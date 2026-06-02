@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urljoin
+from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -100,12 +100,115 @@ class TextParser(HTMLParser):
             self._skip_depth -= 1
 
     def handle_data(self, data: str) -> None:
-        if self._skip_depth == 0:
+        if self._skip_depth == 0 and not is_noise_text(data):
             self.parts.append(data)
+
+
+class SectionParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sections: list[dict[str, Any]] = []
+        self._section_stack: list[bool] = []
+        self._current: dict[str, Any] | None = None
+        self._active: str | None = None
+        self._parts: list[str] = []
+        self._pending_label: str | None = None
+        self._capture_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attr_map = {name: value or "" for name, value in attrs}
+        classes = set(attr_map.get("class", "").split())
+        if tag == "div":
+            is_section = "post" in classes and "mbox" in classes
+            self._section_stack.append(is_section)
+            if is_section:
+                self._start_section()
+        elif tag == "span" and self._current is not None:
+            if "title" in classes:
+                self._start_capture("section_title")
+            elif "fws_displayTitle" in classes:
+                self._start_capture("field_title")
+            elif "fws_displayField" in classes:
+                self._start_capture("field_value")
+        elif tag in {"h1", "h2", "h3", "h4"} and self._current is not None:
+            self._capture_title = True
+
+    def handle_data(self, data: str) -> None:
+        if self._current is None or is_noise_text(data):
+            return
+        if self._active is not None:
+            self._parts.append(data)
+        else:
+            self._current["text_parts"].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._active is not None and tag == "span":
+            text = clean_text("".join(self._parts))
+            if not is_noise_text(text):
+                if self._active == "section_title" and text:
+                    self._current["title"] = text
+                elif self._active == "field_title":
+                    self._pending_label = text.rstrip("：:")
+                elif self._active == "field_value" and self._pending_label:
+                    self._current["items"].append({"label": self._pending_label, "value": text})
+                    self._pending_label = None
+            self._active = None
+            self._parts = []
+            return
+        if tag in {"h1", "h2", "h3", "h4"}:
+            self._capture_title = False
+        if tag == "div" and self._section_stack:
+            is_section = self._section_stack.pop()
+            if is_section:
+                self._finish_section()
+
+    def _start_capture(self, kind: str) -> None:
+        self._active = kind
+        self._parts = []
+
+    def _start_section(self) -> None:
+        self._finish_section()
+        self._current = {"title": "", "items": [], "text_parts": []}
+
+    def _finish_section(self) -> None:
+        if self._current is None:
+            return
+        text = clean_text(" ".join(self._current.pop("text_parts")))
+        if text and not is_noise_text(text):
+            self._current["text"] = text
+        else:
+            self._current["text"] = ""
+        if self._current["title"] or self._current["items"] or self._current["text"]:
+            self.sections.append(self._current)
+        self._current = None
 
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def is_noise_text(value: str) -> bool:
+    text = clean_text(value)
+    if not text:
+        return False
+    noise_markers = (
+        "mso-",
+        "@font-face",
+        "@page",
+        "Style Definitions",
+        "font-family:",
+        "font-size:",
+        "Normal 0",
+    )
+    return any(marker in text for marker in noise_markers)
+
+
+def normalize_detail_url(url: str) -> str:
+    parts = urlsplit(url)
+    path = quote(parts.path, safe="/%")
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def fetch_bytes(url: str, data: dict[str, str] | None = None, retries: int = 3) -> bytes:
@@ -176,11 +279,23 @@ def get_teachers(college_id: int, rows: int) -> dict[str, Any]:
     )
 
 
-def parse_teacher_page(url: str, raw_html: bytes) -> dict[str, Any]:
+def parse_teacher_page(url: str, raw_html: bytes, raw_html_path: Path) -> dict[str, Any]:
     text = raw_html.decode("utf-8", errors="replace")
     field_parser = FieldPairParser()
     field_parser.feed(text)
-    fields = {key: value for key, value in field_parser.items}
+    fields = {
+        key: value
+        for key, value in field_parser.items
+        if not is_noise_text(key) and not is_noise_text(value)
+    }
+
+    section_parser = SectionParser()
+    section_parser.feed(text)
+    sections = [
+        section
+        for section in section_parser.sections
+        if not is_noise_text(section.get("title", "")) and not is_noise_text(section.get("text", ""))
+    ]
 
     text_parser = TextParser()
     text_parser.feed(text)
@@ -188,7 +303,10 @@ def parse_teacher_page(url: str, raw_html: bytes) -> dict[str, Any]:
 
     return {
         "detail_url": url,
+        "raw_html_path": raw_html_path.as_posix(),
         "detail_fields": fields,
+        "detail_sections": sections,
+        "search_text": page_text,
         "detail_text": page_text,
     }
 
@@ -228,8 +346,10 @@ def main() -> None:
 
     data_dir = args.data_dir
     by_college_dir = data_dir / "teachers_by_college"
+    raw_pages_dir = data_dir / "raw_pages"
     data_dir.mkdir(parents=True, exist_ok=True)
     by_college_dir.mkdir(parents=True, exist_ok=True)
+    raw_pages_dir.mkdir(parents=True, exist_ok=True)
 
     all_colleges = get_all_colleges()
     college_by_id = {int(item["collegeId"]): item for item in all_colleges}
@@ -265,9 +385,12 @@ def main() -> None:
                 **teacher,
             }
             if detail_url:
-                full_url = urljoin(BASE_URL, detail_url)
+                full_url = normalize_detail_url(urljoin(BASE_URL, detail_url))
                 try:
-                    detail = parse_teacher_page(full_url, fetch_bytes(full_url))
+                    raw_html = fetch_bytes(full_url)
+                    raw_html_path = raw_pages_dir / f"{college_id}_{teacher.get('columnId', 'unknown')}_{safe_name(str(teacher.get('title', 'teacher')))}.html"
+                    raw_html_path.write_bytes(raw_html)
+                    detail = parse_teacher_page(full_url, raw_html, raw_html_path.relative_to(data_dir.parent))
                     record.update(detail)
                     detail_count += 1
                 except Exception as exc:
