@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from clients.compare_dialog import CompareDialog
 from clients.detail_dialog import DetailDialog
 from clients.search_engine import SearchEngine, SearchResult
-from clients.styles import DARK_THEME, LIGHT_THEME
+from clients.styles import ADDITIONAL_QSS
 
 PAGE_SIZE = 20
 
@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
         self.current_results: list[SearchResult] = []
         self.baseline_results: list[SearchResult] = []
         self.current_page = 0
-        self.dark_mode = False
+        self._current_theme = "auto"  # "auto", "dark", "light"
         self.search_field = ""  # "" means all fields, "name" / "papers" for field-specific
         self._search_worker: SearchWorker | None = None
         self._baseline_worker: SearchWorker | None = None
@@ -121,7 +121,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 750)
         self.resize(1400, 850)
         self._build_ui()
-        self._apply_theme()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -189,7 +188,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.field_btn_papers)
 
         # Theme toggle
-        self.theme_btn = QPushButton("暗色主题")
+        self.theme_btn = QPushButton("切换主题")
         self.theme_btn.setObjectName("themeBtn")
         self.theme_btn.clicked.connect(self._toggle_theme)
         layout.addWidget(self.theme_btn)
@@ -302,7 +301,7 @@ class MainWindow(QMainWindow):
         page_layout.addWidget(self.page_buttons_widget)
 
         self.page_info_label = QLabel("")
-        self.page_info_label.setStyleSheet("color: #64748b; font-size: 12px; margin-left: 12px;")
+        self.page_info_label.setStyleSheet("font-size: 12px; margin-left: 12px;")
         page_layout.addWidget(self.page_info_label)
 
         page_layout.addStretch()
@@ -446,6 +445,7 @@ class MainWindow(QMainWindow):
             detail_btn = QPushButton("详情")
             detail_btn.clicked.connect(lambda checked, rec=r: self._show_detail(rec))
             self.results_table.setCellWidget(row, 6, detail_btn)
+            self.results_table.setRowHeight(row, 36)
 
         # Update pagination
         self._render_pagination(total_pages)
@@ -544,10 +544,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _toggle_theme(self) -> None:
-        self.dark_mode = not self.dark_mode
-        self.theme_btn.setText("亮色主题" if self.dark_mode else "暗色主题")
+        # Cycle: auto -> dark -> light -> auto
+        cycle = {"auto": "dark", "dark": "light", "light": "auto"}
+        self._current_theme = cycle.get(self._current_theme, "auto")
+        theme_labels = {"auto": "跟随系统", "dark": "暗色", "light": "亮色"}
+        self.theme_btn.setText(f"主题：{theme_labels[self._current_theme]}")
         self._apply_theme()
 
     def _apply_theme(self) -> None:
-        style = DARK_THEME if self.dark_mode else LIGHT_THEME
-        self.setStyleSheet(style)
+        import qdarktheme
+        qdarktheme.setup_theme(
+            theme=self._current_theme,
+            additional_qss=ADDITIONAL_QSS,
+            default_theme="dark",
+        )

@@ -38,12 +38,12 @@ class DetailDialog(QDialog):
         header.addWidget(name_label)
 
         career_label = QLabel(self.record.career)
-        career_label.setStyleSheet("font-size: 14px; color: #64748b; margin-left: 12px;")
+        career_label.setStyleSheet("font-size: 14px; margin-left: 12px;")
         header.addWidget(career_label)
         header.addStretch()
 
         college_label = QLabel(self.record.college)
-        college_label.setStyleSheet("font-size: 13px; color: #3b82f6;")
+        college_label.setStyleSheet("font-size: 13px;")
         header.addWidget(college_label)
         layout.addLayout(header)
 
@@ -170,7 +170,7 @@ class DetailDialog(QDialog):
     @staticmethod
     def _section_label(text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("font-weight: bold; font-size: 14px; margin-top: 10px; color: #3b82f6;")
+        label.setObjectName("sectionLabel")
         return label
 
     @staticmethod

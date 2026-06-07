@@ -47,7 +47,7 @@ class CompareDialog(QDialog):
             f"基础系统：{len(baseline)} 条结果  |  "
             f"优化系统：{len(optimized)} 条结果"
         )
-        summary.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px;")
+        summary.setObjectName("compareSummary")
         layout.addWidget(summary)
 
         # Side by side tables
