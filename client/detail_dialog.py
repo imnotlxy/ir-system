@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from clients.search_engine import TeacherRecord
+from client.api_client import TeacherRecord
 
 
 class DetailDialog(QDialog):

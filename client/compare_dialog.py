@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from clients.search_engine import SearchResult
+from client.api_client import SearchResult
 
 
 class CompareDialog(QDialog):
@@ -43,7 +43,7 @@ class CompareDialog(QDialog):
 
         # Summary
         summary = QLabel(
-            f"查询：\"{query}\"  |  "
+            f'查询："{query}"  |  '
             f"基础系统：{len(baseline)} 条结果  |  "
             f"优化系统：{len(optimized)} 条结果"
         )

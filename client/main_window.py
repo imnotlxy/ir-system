@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
-
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -28,10 +25,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from clients.compare_dialog import CompareDialog
-from clients.detail_dialog import DetailDialog
-from clients.search_engine import SearchEngine, SearchResult
-from clients.styles import ADDITIONAL_QSS
+from client.api_client import SearchApiClient, SearchResult
+from client.compare_dialog import CompareDialog
+from client.detail_dialog import DetailDialog
+from client.styles import ADDITIONAL_QSS
 
 PAGE_SIZE = 20
 
@@ -44,7 +41,7 @@ class SearchWorker(QThread):
 
     def __init__(
         self,
-        engine: SearchEngine,
+        api_client: SearchApiClient,
         query: str,
         match_mode: str,
         ranking: str,
@@ -55,7 +52,7 @@ class SearchWorker(QThread):
         is_baseline: bool = False,
     ):
         super().__init__()
-        self.engine = engine
+        self.api_client = api_client
         self.query = query
         self.match_mode = match_mode
         self.ranking = ranking
@@ -67,48 +64,29 @@ class SearchWorker(QThread):
 
     def run(self) -> None:
         try:
-            t0 = time.perf_counter()
-            if self.is_baseline:
-                results = self.engine.search_baseline(
-                    self.query,
-                    ranking=self.ranking,
-                    college_filter=self.college_filter if self.college_filter else None,
-                )
-                mode_info = "基础系统（精确匹配）"
-            else:
-                results = self.engine.search(
-                    self.query,
-                    match_mode=self.match_mode,
-                    ranking=self.ranking,
-                    college_filter=self.college_filter if self.college_filter else None,
-                    research_filter=self.research_filter,
-                    auto_relax=self.auto_relax,
-                    search_field=self.search_field,
-                )
-                mode_info = self._build_mode_info(results)
-            elapsed = time.perf_counter() - t0
+            results, elapsed, mode_info = self.api_client.search(
+                self.query,
+                match_mode=self.match_mode,
+                ranking=self.ranking,
+                college_filter=self.college_filter if self.college_filter else None,
+                research_filter=self.research_filter,
+                auto_relax=self.auto_relax,
+                search_field=self.search_field,
+                baseline=self.is_baseline,
+            )
             self.results_ready.emit(results, elapsed, mode_info)
         except Exception as e:
             self.error_occurred.emit(str(e))
-
-    @staticmethod
-    def _build_mode_info(results: list[SearchResult]) -> str:
-        if not results:
-            return "无结果"
-        mode = results[0].match_mode
-        relaxed = any(r.relaxed for r in results)
-        info = f"匹配模式：{mode}"
-        if relaxed:
-            info += "（已放宽查询）"
-        return info
 
 
 class MainWindow(QMainWindow):
     """Main application window for the IR system."""
 
-    def __init__(self, data_dir: str | Path | None = None):
+    def __init__(self, api_url: str = "http://127.0.0.1:8000"):
         super().__init__()
-        self.engine = SearchEngine(data_dir)
+        self.api_client = SearchApiClient(api_url)
+        self.record_count = 0
+        self.college_names: list[str] = []
         self.current_results: list[SearchResult] = []
         self.baseline_results: list[SearchResult] = []
         self.current_page = 0
@@ -314,25 +292,27 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def load_data(self) -> None:
-        """Load data and populate UI elements."""
-        self.status_bar.showMessage("正在加载数据…")
+        """Load backend metadata and populate UI elements."""
+        self.status_bar.showMessage("正在连接检索后端…")
         try:
-            self.engine.load_data()
-        except FileNotFoundError as e:
-            QMessageBox.critical(self, "数据加载失败", str(e))
-            self.status_bar.showMessage("数据加载失败")
+            metadata = self.api_client.metadata()
+        except RuntimeError as e:
+            QMessageBox.critical(self, "后端连接失败", str(e))
+            self.status_bar.showMessage("后端连接失败")
             return
 
         # Populate college checkboxes
-        for college_name in self.engine.college_names:
+        self.record_count = int(metadata.get("record_count") or 0)
+        self.college_names = list(metadata.get("college_names") or [])
+        for college_name in self.college_names:
             chk = QCheckBox(college_name)
             chk.setChecked(True)
             self.college_checks.append(chk)
             self.college_layout.addWidget(chk)
 
         self.status_bar.showMessage(
-            f"数据加载完成 — 共 {len(self.engine.records)} 位导师，"
-            f"{len(self.engine.college_names)} 个学院"
+            f"后端连接成功 — 共 {self.record_count} 位导师，"
+            f"{len(self.college_names)} 个学院"
         )
 
     # ------------------------------------------------------------------
@@ -357,7 +337,7 @@ class MainWindow(QMainWindow):
 
         # Run optimized search
         self._search_worker = SearchWorker(
-            self.engine, query, match_mode, ranking,
+            self.api_client, query, match_mode, ranking,
             college_filter, research_filter, auto_relax,
             search_field=self.search_field,
         )
@@ -367,7 +347,7 @@ class MainWindow(QMainWindow):
 
         # Run baseline search in parallel
         self._baseline_worker = SearchWorker(
-            self.engine, query, "exact", ranking,
+            self.api_client, query, "exact", ranking,
             college_filter, "", False, is_baseline=True,
         )
         self._baseline_worker.results_ready.connect(self._on_baseline_done)

@@ -9,3 +9,7 @@ dependencies = [
     "jieba>=0.42.1",
     "pyqtdarktheme>=2.1.0",
 ]
+
+[project.scripts]
+ir-backend = "backend.server:main"
+ir-client = "main:main"

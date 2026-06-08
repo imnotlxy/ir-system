@@ -1,5 +1,40 @@
 # IR System
 
+## 前后端拆分
+
+检索系统已经拆到 `backend` 包中，Qt 客户端通过 HTTP/HTTPS 调用后端 API。
+
+启动后端：
+
+```bash
+uv run python -m backend.server --host 127.0.0.1 --port 8000
+```
+
+启动 Qt 前端：
+
+```bash
+uv run python main.py --api-url http://127.0.0.1:8000
+```
+
+如果要直接使用安装后的脚本，也可以运行：
+
+```bash
+uv run ir-backend --host 127.0.0.1 --port 8000
+uv run ir-client --api-url http://127.0.0.1:8000
+```
+
+后端接口：
+
+- `GET /health`：健康检查。
+- `GET /metadata`：返回导师总数和学院列表。
+- `POST /search`：执行检索，请求体为 JSON，支持 `query`、`match_mode`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`、`baseline`。
+
+HTTPS 可以通过 `--certfile` 和 `--keyfile` 启用：
+
+```bash
+uv run python -m backend.server --certfile cert.pem --keyfile key.pem
+```
+
 ## 隐私信息脱敏
 
 公共脱敏组件位于 `common/privacy_sanitizer.py`，两套 IR 系统都可以复用。
