@@ -22,14 +22,16 @@ class TeacherRecord:
     career: str = ""
     college: str = ""
     college_id: int = 0
+    gender: str = ""
     research: str = ""
-    papers: str = ""
+    representative_works: list[str] = field(default_factory=list)
     email: str = ""
     phone: str = ""
     education: str = ""
     intro: str = ""
     projects: str = ""
     search_text: str = ""
+    sections: list[dict] = field(default_factory=list)
     detail_url: str = ""
     tokens: list[str] = field(default_factory=list)
     field_tokens: dict[str, list[str]] = field(default_factory=dict)
@@ -107,37 +109,71 @@ class SearchEngine:
 
     def _parse_record(self, raw: dict) -> TeacherRecord:
         """Parse a raw JSON record into a TeacherRecord."""
-        fields = raw.get("detail_fields", {})
-        name = raw.get("title", "")
-        career = raw.get("career", "")
-        college = raw.get("collegeName", "")
-        college_id = raw.get("collegeId", 0)
-        research = fields.get("研究领域", fields.get("研究方向", ""))
-        papers = fields.get("论文", "")
-        email = fields.get("电子邮箱", "")
-        phone = fields.get("联系电话", "")
-        education = fields.get("教育经历", "")
-        intro = fields.get("个人简介", "")
-        projects = fields.get("科研项目", "")
-        search_text = raw.get("search_text", "")
-        detail_url = raw.get("detail_url", "")
+        if int(raw.get("schema_version") or 1) >= 2:
+            profile = raw.get("profile", {})
+            source = raw.get("source", {})
+            text = raw.get("text", {})
+            raw_api = raw.get("raw_api", {})
+            sections = list(text.get("sections") or [])
+
+            name = profile.get("name", "")
+            career = profile.get("title", "") or raw_api.get("career", "")
+            college = source.get("college_name", "")
+            college_id = int(source.get("college_id") or 0)
+            gender = profile.get("gender", "")
+            research = profile.get("research_directions", "")
+            representative_works = list(profile.get("representative_works") or [])
+            email = profile.get("email", "")
+            phone = profile.get("phone", "")
+            education = self._section_text(sections, {"教育经历"})
+            intro = self._section_text(sections, {"个人简介", "个人简历", "个人概况"})
+            projects = self._section_text(sections, {"科研项目"})
+            search_text = text.get("full_text", "")
+            detail_url = source.get("detail_url", "")
+        else:
+            fields = raw.get("detail_fields", {})
+            sections = self._legacy_sections(raw.get("detail_sections", []))
+            name = raw.get("title", "")
+            career = raw.get("career", "")
+            college = raw.get("collegeName", "")
+            college_id = raw.get("collegeId", 0)
+            gender = fields.get("性别", "")
+            research = fields.get("研究领域", fields.get("研究方向", ""))
+            representative_works = self._split_legacy_works(fields.get("论文", ""))
+            email = fields.get("电子邮箱", "")
+            phone = fields.get("联系电话", "")
+            education = fields.get("教育经历", "")
+            intro = fields.get("个人简介", "")
+            projects = fields.get("科研项目", "")
+            search_text = raw.get("search_text", "")
+            detail_url = raw.get("detail_url", "")
 
         # Build a combined text for indexing
+        works_text = " ".join(representative_works)
+        section_text = " ".join(
+            paragraph
+            for section in sections
+            for paragraph in section.get("paragraphs", [])
+        )
         combined = " ".join(
-            filter(None, [name, career, college, research, papers, education, intro, projects, search_text])
+            filter(None, [name, career, college, gender, research, works_text, education, intro, projects, section_text, search_text])
         )
         tokens = self._tokenize(combined)
 
         # Build per-field tokens for field-specific search
         field_tokens = {
             "name": self._tokenize(name),
-            "papers": self._tokenize(papers),
+            "papers": self._tokenize(works_text),
+            "works": self._tokenize(works_text),
             "research": self._tokenize(research),
             "college": self._tokenize(college),
             "career": self._tokenize(career),
+            "title": self._tokenize(career),
             "education": self._tokenize(education),
             "intro": self._tokenize(intro),
             "projects": self._tokenize(projects),
+            "profile": self._tokenize(" ".join(filter(None, [name, career, college, gender, email, phone]))),
+            "text": self._tokenize(section_text or search_text),
         }
 
         return TeacherRecord(
@@ -146,18 +182,51 @@ class SearchEngine:
             career=career,
             college=college,
             college_id=college_id,
+            gender=gender,
             research=research,
-            papers=papers,
+            representative_works=representative_works,
             email=email,
             phone=phone,
             education=education,
             intro=intro,
             projects=projects,
             search_text=search_text,
+            sections=sections,
             detail_url=detail_url,
             tokens=tokens,
             field_tokens=field_tokens,
         )
+
+    @staticmethod
+    def _section_text(sections: list[dict], headings: set[str]) -> str:
+        paragraphs: list[str] = []
+        for section in sections:
+            heading = str(section.get("heading", "")).strip()
+            if heading in headings:
+                paragraphs.extend(str(item) for item in section.get("paragraphs", []))
+        return " ".join(paragraphs)
+
+    @staticmethod
+    def _legacy_sections(sections: list[dict]) -> list[dict]:
+        result: list[dict] = []
+        for section in sections:
+            paragraphs = []
+            for item in section.get("items", []):
+                label = item.get("label", "")
+                value = item.get("value", "")
+                if value:
+                    paragraphs.append(f"{label}: {value}")
+            if section.get("text"):
+                paragraphs.append(section["text"])
+            if section.get("title") or paragraphs:
+                result.append({"heading": section.get("title", ""), "paragraphs": paragraphs})
+        return result
+
+    @staticmethod
+    def _split_legacy_works(text: str, limit: int = 5) -> list[str]:
+        parts = re.split(r"(?=(?:^|\s)\d{1,2}[、.．])", text or "")
+        works = [part.strip() for part in parts if part.strip()]
+        return works[:limit] if works else []
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:

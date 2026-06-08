@@ -50,29 +50,26 @@ class DetailDialog(QDialog):
         # Tabs
         tabs = QTabWidget()
         tabs.addTab(self._build_info_tab(), "基本信息")
-        tabs.addTab(self._build_research_tab(), "研究方向与项目")
-        tabs.addTab(self._build_papers_tab(), "论文")
+        tabs.addTab(self._build_sections_tab(), "结构化文本")
+        tabs.addTab(self._build_works_tab(), "代表作")
         layout.addWidget(tabs)
 
     def _build_info_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        fields = self.record.raw.get("detail_fields", {})
         display_order = [
-            ("性别", "性别"),
-            ("学位", "学位"),
-            ("学历", "学历"),
-            ("毕业院校", "毕业院校"),
-            ("电子邮箱", "电子邮箱"),
-            ("联系电话", "联系电话"),
-            ("办公地址", "办公地址"),
-            ("通讯地址", "通讯地址"),
-            ("邮编", "邮编"),
+            ("姓名", self.record.name),
+            ("性别", self.record.gender),
+            ("职称", self.record.career),
+            ("学院", self.record.college),
+            ("电子邮箱", self.record.email),
+            ("联系电话", self.record.phone),
+            ("研究方向", self.record.research),
+            ("原始页面", self.record.detail_url),
         ]
 
-        for label_text, key in display_order:
-            value = fields.get(key, "")
+        for label_text, value in display_order:
             if not value:
                 continue
             row = QHBoxLayout()
@@ -85,86 +82,47 @@ class DetailDialog(QDialog):
             row.addWidget(val, 1)
             layout.addLayout(row)
 
-        # Education experience
-        edu = fields.get("教育经历", "")
-        if edu:
-            layout.addWidget(self._section_label("教育经历"))
-            layout.addWidget(self._content_label(edu))
-
-        # Work experience
-        work = fields.get("工作经历", "")
-        if work:
-            layout.addWidget(self._section_label("工作经历"))
-            layout.addWidget(self._content_label(work))
-
-        # Intro
-        intro = fields.get("个人简介", "")
-        if intro:
-            layout.addWidget(self._section_label("个人简介"))
-            layout.addWidget(self._content_label(intro))
-
         layout.addStretch()
         return widget
 
-    def _build_research_tab(self) -> QWidget:
+    def _build_sections_tab(self) -> QWidget:
         widget = QWidget()
-        layout = QVBoxLayout(widget)
+        outer = QVBoxLayout(widget)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
 
-        fields = self.record.raw.get("detail_fields", {})
-
-        research = fields.get("研究领域", fields.get("研究方向", ""))
-        if research:
-            layout.addWidget(self._section_label("研究领域"))
-            layout.addWidget(self._content_label(research))
-
-        courses = fields.get("开授课程", "")
-        if courses:
-            layout.addWidget(self._section_label("开授课程"))
-            layout.addWidget(self._content_label(courses))
-
-        projects = fields.get("科研项目", "")
-        if projects:
-            layout.addWidget(self._section_label("科研项目"))
-            layout.addWidget(self._content_label(projects))
-
-        honors = fields.get("荣誉及奖励", "")
-        if honors:
-            layout.addWidget(self._section_label("荣誉及奖励"))
-            layout.addWidget(self._content_label(honors))
-
-        enrollment = fields.get("招生信息", "")
-        if enrollment:
-            layout.addWidget(self._section_label("招生信息"))
-            layout.addWidget(self._content_label(enrollment))
+        sections = self.record.sections or self.record.raw.get("text", {}).get("sections", [])
+        if sections:
+            for section in sections:
+                heading = section.get("heading") or "未命名段落"
+                paragraphs = [p for p in section.get("paragraphs", []) if p]
+                if not paragraphs:
+                    continue
+                layout.addWidget(self._section_label(heading))
+                for paragraph in paragraphs:
+                    layout.addWidget(self._content_label(paragraph))
+        else:
+            layout.addWidget(QLabel("暂无结构化文本"))
 
         layout.addStretch()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         return widget
 
-    def _build_papers_tab(self) -> QWidget:
+    def _build_works_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        fields = self.record.raw.get("detail_fields", {})
-
-        papers = fields.get("论文", "")
-        if papers:
+        works = self.record.representative_works or []
+        if works:
             browser = QTextBrowser()
             browser.setOpenExternalLinks(True)
-            browser.setPlainText(papers)
+            browser.setPlainText("\n\n".join(works))
             layout.addWidget(browser)
         else:
-            layout.addWidget(QLabel("暂无论文信息"))
-
-        patents = fields.get("专利", "")
-        if patents:
-            layout.addWidget(self._section_label("专利"))
-            layout.addWidget(self._content_label(patents))
-
-        software = fields.get("软件著作", "")
-        if software:
-            layout.addWidget(self._section_label("软件著作"))
-            layout.addWidget(self._content_label(software))
-
+            layout.addWidget(QLabel("暂无代表作信息"))
         return widget
 
     @staticmethod

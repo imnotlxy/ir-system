@@ -1,36 +1,12 @@
 {
   "source": "https://web.suda.edu.cn",
-  "generated_at": "2026-06-02T13:52:55.041101+00:00",
+  "schema_version": 2,
+  "generated_at": "2026-06-08T03:12:31.578064+00:00",
   "selected_college_count": 5,
   "teacher_count": 454,
   "detail_page_success_count": 448,
-  "detail_page_error_count": 6,
-  "detail_page_errors": [
-    {
-      "url": "http://web.suda.edu.cn/jjf2",
-      "error": "fetch failed: http://web.suda.edu.cn/jjf2"
-    },
-    {
-      "url": "http://web.suda.edu.cn/zzliu17",
-      "error": "fetch failed: http://web.suda.edu.cn/zzliu17"
-    },
-    {
-      "url": "http://web.suda.edu.cn/jyliu0919",
-      "error": "fetch failed: http://web.suda.edu.cn/jyliu0919"
-    },
-    {
-      "url": "http://web.suda.edu.cn/jcshen",
-      "error": "fetch failed: http://web.suda.edu.cn/jcshen"
-    },
-    {
-      "url": "http://web.suda.edu.cn/sywang",
-      "error": "fetch failed: http://web.suda.edu.cn/sywang"
-    },
-    {
-      "url": "http://web.suda.edu.cn/xiux",
-      "error": "fetch failed: http://web.suda.edu.cn/xiux"
-    }
-  ],
+  "detail_page_error_count": 0,
+  "detail_page_errors": [],
   "selected_colleges": [
     {
       "collegeId": 15,

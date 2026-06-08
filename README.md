@@ -29,6 +29,29 @@ uv run ir-client --api-url http://127.0.0.1:8000
 - `GET /metadata`：返回导师总数和学院列表。
 - `POST /search`：执行检索，请求体为 JSON，支持 `query`、`match_mode`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`、`baseline`。
 
+## 爬虫与数据结构
+
+爬虫位于 `crawler/suda_teachers.py`。重新爬取会保存原始 HTML，并输出 v2 JSONL：
+
+```bash
+uv run python -m crawler.suda_teachers
+```
+
+如果只想基于已有 `data/raw_pages/*.html` 重新生成结构化数据：
+
+```bash
+uv run python -m crawler.suda_teachers --from-cache
+```
+
+`data/teachers.jsonl` 每行一位教师，核心结构为：
+
+- `source`：来源信息，包括 `detail_url`、`raw_html_path`、`college_id`、`college_name`、`teacher_id`。
+- `profile`：可直接检索和展示的教师信息，包括 `name`、`gender`、`phone`、`email`、`title`、`representative_works`、`research_directions`。
+- `text`：从 HTML 提取出的文本结构，包括清洗后的 `full_text` 和轻量段落结构 `sections[].heading / sections[].paragraphs`。
+- `raw_api`：教师列表接口返回的原始元数据，便于追溯。
+
+原始 HTML 不嵌入 JSONL，统一保留在 `data/raw_pages/`，JSONL 通过 `source.raw_html_path` 引用。
+
 HTTPS 可以通过 `--certfile` 和 `--keyfile` 启用：
 
 ```bash

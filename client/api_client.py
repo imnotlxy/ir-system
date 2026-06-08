@@ -17,14 +17,17 @@ class TeacherRecord:
     career: str = ""
     college: str = ""
     college_id: int = 0
+    gender: str = ""
     research: str = ""
     papers: str = ""
+    representative_works: list[str] | None = None
     email: str = ""
     phone: str = ""
     education: str = ""
     intro: str = ""
     projects: str = ""
     search_text: str = ""
+    sections: list[dict[str, Any]] | None = None
     detail_url: str = ""
 
     @classmethod
@@ -35,14 +38,17 @@ class TeacherRecord:
             career=payload.get("career") or "",
             college=payload.get("college") or "",
             college_id=int(payload.get("college_id") or 0),
+            gender=payload.get("gender") or "",
             research=payload.get("research") or "",
             papers=payload.get("papers") or "",
+            representative_works=list(payload.get("representative_works") or []),
             email=payload.get("email") or "",
             phone=payload.get("phone") or "",
             education=payload.get("education") or "",
             intro=payload.get("intro") or "",
             projects=payload.get("projects") or "",
             search_text=payload.get("search_text") or "",
+            sections=list(payload.get("sections") or []),
             detail_url=payload.get("detail_url") or "",
         )
 

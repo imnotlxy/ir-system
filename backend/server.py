@@ -21,14 +21,17 @@ def _record_to_dict(record: TeacherRecord) -> dict[str, Any]:
         "career": record.career,
         "college": record.college,
         "college_id": record.college_id,
+        "gender": record.gender,
         "research": record.research,
-        "papers": record.papers,
+        "papers": "\n".join(record.representative_works),
+        "representative_works": record.representative_works,
         "email": record.email,
         "phone": record.phone,
         "education": record.education,
         "intro": record.intro,
         "projects": record.projects,
         "search_text": record.search_text,
+        "sections": record.sections,
         "detail_url": record.detail_url,
     }
 
