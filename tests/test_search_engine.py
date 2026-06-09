@@ -11,6 +11,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SearchEngineTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._index_cache_dir = tempfile.TemporaryDirectory()
+        cls.engine = SearchEngine(
+            ROOT / "data",
+            index_path=Path(cls._index_cache_dir.name) / "index.json",
+        )
+        cls.engine.load_data()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._index_cache_dir.cleanup()
+
     def _write_sample_data(self, root: Path) -> None:
         records = [
             {
@@ -55,10 +68,7 @@ class SearchEngineTest(unittest.TestCase):
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def test_exact_teacher_name_ranks_first(self) -> None:
-        engine = SearchEngine(ROOT / "data")
-        engine.load_data()
-
-        results = engine.search("周国栋", top_k=3)
+        results = self.engine.search("周国栋", top_k=3)
 
         self.assertTrue(results)
         self.assertEqual(results[0].record.name, "周国栋")
@@ -108,6 +118,20 @@ class SearchEngineTest(unittest.TestCase):
 
             self.assertTrue(results)
             self.assertEqual(results[0].record.name, "陈伟")
+
+    def test_name_field_single_character_search_finds_names(self) -> None:
+        results = self.engine.search("周", search_field="name", top_k=20)
+        names = {result.record.name for result in results}
+
+        self.assertIn("周国栋", names)
+        self.assertIn("周建康", names)
+
+    def test_name_field_single_character_index_supports_middle_character(self) -> None:
+        results = self.engine.search("建", search_field="name", top_k=20)
+        names = {result.record.name for result in results}
+
+        self.assertIn("莫建华", names)
+        self.assertIn("周建康", names)
 
 
 if __name__ == "__main__":

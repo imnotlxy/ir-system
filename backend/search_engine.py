@@ -12,7 +12,7 @@ from pathlib import Path
 
 import jieba
 
-SEARCH_INDEX_SCHEMA_VERSION = 1
+SEARCH_INDEX_SCHEMA_VERSION = 2
 DEFAULT_SEARCH_INDEX_SUBDIR = "search_index"
 DEFAULT_SEARCH_INDEX_FILENAME = "index.json"
 
@@ -152,7 +152,7 @@ class SearchEngine:
             return None
         if payload.get("source") != "teachers.jsonl":
             return None
-        if payload.get("tokenizer") != "jieba-v1":
+        if payload.get("tokenizer") != "jieba-with-single-char-v1":
             return None
         if payload.get("source_signature") != source_signature:
             return None
@@ -237,7 +237,7 @@ class SearchEngine:
             "schema_version": SEARCH_INDEX_SCHEMA_VERSION,
             "source": "teachers.jsonl",
             "source_signature": source_signature,
-            "tokenizer": "jieba-v1",
+            "tokenizer": "jieba-with-single-char-v1",
             "record_count": len(self.records),
             "doc_lengths": self.doc_lengths,
             "avg_dl": self.avg_dl,
@@ -326,26 +326,26 @@ class SearchEngine:
                     ],
                 )
             )
-            tokens = self._tokenize(combined)
+            tokens = self._tokenize_for_index(combined)
 
             field_tokens = {
-                "name": self._tokenize(name),
-                "papers": self._tokenize(works_text),
-                "works": self._tokenize(works_text),
-                "research": self._tokenize(research),
-                "college": self._tokenize(college),
-                "career": self._tokenize(career),
-                "title": self._tokenize(career),
-                "education": self._tokenize(education),
-                "intro": self._tokenize(intro),
-                "projects": self._tokenize(projects),
-                "profile": self._tokenize(
+                "name": self._tokenize_for_index(name),
+                "papers": self._tokenize_for_index(works_text),
+                "works": self._tokenize_for_index(works_text),
+                "research": self._tokenize_for_index(research),
+                "college": self._tokenize_for_index(college),
+                "career": self._tokenize_for_index(career),
+                "title": self._tokenize_for_index(career),
+                "education": self._tokenize_for_index(education),
+                "intro": self._tokenize_for_index(intro),
+                "projects": self._tokenize_for_index(projects),
+                "profile": self._tokenize_for_index(
                     " ".join(
                         filter(None, [name, career, college, gender, email, phone])
                     )
                 ),
-                "text": self._tokenize(section_text or search_text),
-            }
+                "text": self._tokenize_for_index(section_text or search_text),
+        }
 
         return TeacherRecord(
             raw=raw,
@@ -410,6 +410,17 @@ class SearchEngine:
             word = word.strip()
             if word and len(word) > 0:
                 tokens.append(word.lower())
+        return tokens
+
+    @staticmethod
+    def _tokenize_for_index(text: str) -> list[str]:
+        """Tokenize text for indexing, including Chinese single-character tokens."""
+        tokens = SearchEngine._tokenize(text)
+        seen = set(tokens)
+        for char in re.findall(r"[\u4e00-\u9fff]", text):
+            if char not in seen:
+                tokens.append(char)
+                seen.add(char)
         return tokens
 
     # ------------------------------------------------------------------
