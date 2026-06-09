@@ -212,6 +212,122 @@ class TeacherPageParser(HTMLParser):
         self._section_depth = 0
 
 
+class LegacyTeacherPageParser(HTMLParser):
+    """Fallback parser for older self-authored teacher homepages."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sections: list[dict[str, Any]] = []
+        self.full_text_parts: list[str] = []
+        self.emails: list[str] = []
+        self._skip_depth = 0
+        self._current: dict[str, Any] | None = None
+        self._section_depth = 0
+        self._paragraph_parts: list[str] = []
+        self._heading_capture_depth = 0
+        self._heading_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style"}:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+
+        attr_map = {name: value or "" for name, value in attrs}
+        classes = set(attr_map.get("class", "").split())
+        href = attr_map.get("href", "")
+        if href.lower().startswith("mailto:"):
+            email = clean_text(href.split(":", 1)[1].split("?", 1)[0])
+            if email and email not in self.emails:
+                self.emails.append(email)
+
+        if self._heading_capture_depth:
+            self._heading_capture_depth += 1
+            return
+
+        if tag == "div" and "tab_con" in classes:
+            self._finish_section()
+            self._current = {"heading": "", "paragraphs": []}
+            self._section_depth = 1
+            self._paragraph_parts = []
+            return
+
+        if self._current is None:
+            return
+
+        if tag == "div":
+            self._section_depth += 1
+        if tag == "p" and attr_map.get("id") == "page-info":
+            self._finish_paragraph()
+            self._heading_capture_depth = 1
+            self._heading_parts = []
+        elif tag in SECTION_BREAK_TAGS or tag in {"blockquote", "cite"}:
+            self._finish_paragraph()
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth or is_noise_text(data):
+            return
+        text = clean_text(data)
+        if not text:
+            return
+        self.full_text_parts.append(text)
+        if self._heading_capture_depth:
+            self._heading_parts.append(text)
+        elif self._current is not None:
+            self._paragraph_parts.append(text)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style"} and self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if self._skip_depth:
+            return
+
+        if self._heading_capture_depth:
+            self._heading_capture_depth -= 1
+            if self._heading_capture_depth <= 0:
+                heading = clean_text(" ".join(self._heading_parts))
+                if heading and self._current is not None and not self._current.get("heading"):
+                    self._current["heading"] = heading
+                self._heading_parts = []
+            return
+
+        if self._current is not None and (tag in SECTION_BREAK_TAGS or tag in {"blockquote", "cite"}):
+            self._finish_paragraph()
+
+        if self._current is not None and tag == "div":
+            self._section_depth -= 1
+            if self._section_depth <= 0:
+                self._finish_section()
+
+    def close(self) -> None:
+        super().close()
+        self._finish_section()
+
+    def _finish_paragraph(self) -> None:
+        if self._current is None or not self._paragraph_parts:
+            self._paragraph_parts = []
+            return
+        paragraph = clean_text(" ".join(self._paragraph_parts))
+        self._paragraph_parts = []
+        if paragraph and not is_noise_text(paragraph) and not is_boilerplate_text(paragraph):
+            self._current["paragraphs"].append(paragraph)
+
+    def _finish_section(self) -> None:
+        if self._current is None:
+            return
+        self._finish_paragraph()
+        heading = clean_text(self._current.get("heading", ""))
+        paragraphs = dedupe_texts(self._current.get("paragraphs", []))
+        if heading not in DROP_SECTION_TITLES and paragraphs:
+            self.sections.append({"heading": heading, "paragraphs": paragraphs})
+        self._current = None
+        self._section_depth = 0
+
+
 def clean_text(value: str) -> str:
     value = html.unescape(value).replace("\xa0", " ")
     value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", " ", value)
@@ -352,6 +468,30 @@ def split_numbered_items(text: str, limit: int = 5) -> list[str]:
     return items[:limit]
 
 
+def is_publication_like(text: str) -> bool:
+    text = clean_text(text)
+    if len(text) < 40:
+        return False
+    markers = (
+        "ACL",
+        "EMNLP",
+        "COLING",
+        "IJCAI",
+        "AAAI",
+        "CIKM",
+        "SIGIR",
+        "IEEE",
+        "ACM",
+        "Journal",
+        "Transactions",
+        "Proceedings",
+        "会议",
+        "学报",
+        "期刊",
+    )
+    return bool(re.search(r"\b(?:19|20)\d{2}\b", text)) and any(marker in text for marker in markers)
+
+
 def extract_representative_works(fields: dict[str, str], sections: list[dict[str, Any]]) -> list[str]:
     explicit = first_value(fields, ["代表作", "代表性成果", "代表性论文", "代表论文"])
     if explicit:
@@ -364,22 +504,167 @@ def extract_representative_works(fields: dict[str, str], sections: list[dict[str
                 continue
             marker_text = re.split(r"代表作(?:（[^）]*）)?|代表性论文", paragraph, maxsplit=1)
             if len(marker_text) == 2 and marker_text[1].strip():
-                inline_works = split_numbered_items(marker_text[1])
+                inline_works = [item for item in split_numbered_items(marker_text[1]) if is_publication_like(item)]
                 if inline_works:
                     return inline_works
             works: list[str] = []
             for candidate in paragraphs[idx + 1 :]:
                 if re.search(r"科研项目|招生信息|教育经历|工作经历|研究方向|研究领域", candidate):
                     break
-                if re.match(r"^\s*\d{1,2}[、.．]", candidate) or re.search(r"\b(KDD|ICML|AAAI|WWW|IEEE|ACM|SCI|CCF)\b", candidate):
+                if is_publication_like(candidate) or re.match(r"^\s*\d{1,2}[、.．]", candidate):
                     works.append(clean_text(candidate))
                 if len(works) >= 5:
                     break
             if works:
                 return works
 
+    for section in sections:
+        heading = clean_text(str(section.get("heading", "")))
+        if heading not in {"论文", "发表论文", "学术论文"}:
+            continue
+        works = [
+            clean_text(paragraph)
+            for paragraph in section.get("paragraphs", [])
+            if is_publication_like(paragraph)
+        ]
+        if works:
+            return works[:5]
+
     papers = first_value(fields, ["论文"])
     return split_numbered_items(papers, limit=5)
+
+
+def paragraph_text(sections: list[dict[str, Any]]) -> str:
+    return clean_text(
+        " ".join(
+            paragraph
+            for section in sections
+            for paragraph in section.get("paragraphs", [])
+        )
+    )
+
+
+def section_paragraphs(sections: list[dict[str, Any]]) -> list[str]:
+    return [
+        clean_text(paragraph)
+        for section in sections
+        for paragraph in section.get("paragraphs", [])
+        if clean_text(paragraph)
+    ]
+
+
+def extract_labeled_value(text: str, labels: list[str], stop_labels: list[str] | None = None) -> str:
+    if stop_labels is None:
+        stop_labels = [
+            "电话",
+            "电邮",
+            "邮箱",
+            "电子邮箱",
+            "办公室",
+            "通讯地址",
+            "教育背景",
+            "工作背景",
+            "研究方向",
+            "学术论文",
+            "学术活动",
+            "开授课程",
+            "科研项目",
+            "科研成果",
+            "技术专长",
+            "社会兼职",
+            "基本信息",
+            "联系方式",
+        ]
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    stop_pattern = "|".join(re.escape(label) for label in stop_labels if label not in labels)
+    label_prefix = rf"(?:{label_pattern})\s*[:：]\s*"
+    stop_prefix = rf"\s*(?:{stop_pattern})\s*[:：]" if stop_pattern else "$^"
+
+    for chunk in re.split(r"[\r\n]+", text):
+        chunk = clean_text(chunk)
+        if not chunk:
+            continue
+        match = re.search(rf"{label_prefix}(.*)", chunk)
+        if match:
+            value = re.split(stop_prefix, match.group(1), maxsplit=1)[0]
+            return clean_text(value)
+
+    compact_text = clean_text(text)
+    if stop_pattern:
+        pattern = rf"{label_prefix}(.*?)(?={stop_prefix}|$)"
+    else:
+        pattern = rf"{label_prefix}(.*)$"
+    match = re.search(pattern, compact_text)
+    return clean_text(match.group(1)) if match else ""
+
+
+def extract_email_from_text(text: str, emails: list[str]) -> str:
+    for email in emails:
+        if email:
+            return clean_text(email)
+    match = re.search(r"[\w.+-]+\s*@\s*[\w.-]+\.\w+", text)
+    if match:
+        return clean_text(match.group(0).replace(" ", ""))
+    obfuscated = re.search(r"([\w.+-]+)\s*(?:\[at\]|\(at\)| at )\s*([\w.-]+)\s*(?:\[dot\]|\(dot\)| dot |\.)\s*(\w+)", text, re.I)
+    if obfuscated:
+        return clean_text(f"{obfuscated.group(1)}@{obfuscated.group(2)}.{obfuscated.group(3)}")
+    return ""
+
+
+def extract_legacy_title(text: str) -> str:
+    title_words = ["特聘教授", "教授", "副教授", "讲师", "博士生导师", "硕士生导师"]
+    for sentence in re.split(r"[。；;]\s*|\s{2,}", text):
+        sentence = clean_text(sentence)
+        if "大学" not in sentence and not any(word in sentence for word in title_words):
+            continue
+        hits: list[str] = []
+        for word in title_words:
+            if word in sentence and not any(word in hit for hit in hits):
+                hits.append(word)
+        if hits:
+            return clean_text("，".join(dict.fromkeys(hits)))
+    return ""
+
+
+def enrich_fields_from_legacy(
+    fields: dict[str, str],
+    sections: list[dict[str, Any]],
+    full_text: str,
+    emails: list[str],
+    infer_title: bool = True,
+) -> dict[str, str]:
+    if not sections and not full_text:
+        return fields
+
+    enriched = dict(fields)
+    paragraphs = section_paragraphs(sections)
+    text = "\n".join(paragraphs) or clean_text(full_text)
+    if "电子邮箱" not in enriched and "邮箱" not in enriched:
+        email = extract_email_from_text(text, emails)
+        if email:
+            enriched["电子邮箱"] = email
+    if "电话" not in enriched and "联系电话" not in enriched:
+        phone = extract_labeled_value(text, ["电话", "联系电话", "办公电话"])
+        phone_match = re.search(r"(?:\+?86[-\s]?)?(?:0\d{2,3}[-\s]?\d{7,8}|\d{7,8})(?:\s*\([^)]*\))?", phone)
+        if phone_match:
+            enriched["电话"] = clean_text(phone_match.group(0))
+    if "研究方向" not in enriched and "研究领域" not in enriched:
+        research = extract_labeled_value(text, ["研究方向", "研究领域"])
+        if research:
+            enriched["研究方向"] = research.rstrip("。")
+    if "教育经历" not in enriched:
+        education = extract_labeled_value(text, ["教育背景", "教育经历"])
+        if education:
+            enriched["教育经历"] = education
+    if "工作经历" not in enriched:
+        work = extract_labeled_value(text, ["工作背景", "工作经历"])
+        if work:
+            enriched["工作经历"] = work
+    if infer_title and "职称" not in enriched and "专业技术职务" not in enriched:
+        title = extract_legacy_title(text)
+        if title:
+            enriched["职称"] = title
+    return enriched
 
 
 def build_profile(raw_teacher: dict[str, Any], fields: dict[str, str], sections: list[dict[str, Any]]) -> dict[str, Any]:
@@ -407,12 +692,27 @@ def parse_teacher_page(url: str, raw_html: bytes, raw_html_path: Path, raw_teach
         for section in parser.sections
         if section.get("heading") or section.get("paragraphs")
     ]
+    full_text_parts = parser.full_text_parts
+    if not sections:
+        legacy_parser = LegacyTeacherPageParser()
+        legacy_parser.feed(text)
+        legacy_parser.close()
+        sections = [
+            section
+            for section in legacy_parser.sections
+            if section.get("heading") or section.get("paragraphs")
+        ]
+        fields = enrich_fields_from_legacy(
+            fields,
+            sections,
+            " ".join(legacy_parser.full_text_parts),
+            legacy_parser.emails,
+            infer_title=not clean_text(str(raw_teacher.get("career", ""))),
+        )
+        full_text_parts = legacy_parser.full_text_parts
+
     profile = build_profile(raw_teacher, fields, sections)
-    section_text = " ".join(
-        paragraph
-        for section in sections
-        for paragraph in section.get("paragraphs", [])
-    )
+    section_text = paragraph_text(sections)
     full_text = clean_text(
         " ".join(
             str(value)
@@ -425,6 +725,7 @@ def parse_teacher_page(url: str, raw_html: bytes, raw_html_path: Path, raw_teach
                 profile.get("research_directions", ""),
                 " ".join(profile.get("representative_works", [])),
                 section_text,
+                " ".join(full_text_parts) if not section_text else "",
             ]
             if value
         )

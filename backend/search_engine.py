@@ -287,6 +287,16 @@ class SearchEngine:
 
         return score / (doc_len * query_len) if (doc_len * query_len) > 0 else 0.0
 
+    @staticmethod
+    def _name_match_boost(query_tokens: list[str], record: TeacherRecord) -> float:
+        query_text = re.sub(r"\s+", "", "".join(query_tokens).lower())
+        name = re.sub(r"\s+", "", record.name.lower())
+        if query_text and query_text == name:
+            return 100.0
+        if query_text and query_text in name:
+            return 20.0
+        return 0.0
+
     # ------------------------------------------------------------------
     # Search methods
     # ------------------------------------------------------------------
@@ -443,7 +453,7 @@ class SearchEngine:
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx)
+            score = score_fn(query_tokens, idx) + self._name_match_boost(query_tokens, self.records[idx])
             if score > 0:
                 results.append(SearchResult(
                     record=self.records[idx],
@@ -492,7 +502,7 @@ class SearchEngine:
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx)
+            score = score_fn(query_tokens, idx) + self._name_match_boost(query_tokens, self.records[idx])
             if score > 0:
                 results.append(SearchResult(
                     record=self.records[idx],
