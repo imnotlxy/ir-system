@@ -7,8 +7,6 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -16,11 +14,10 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QRadioButton,
+    QScrollArea,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -45,7 +42,7 @@ class SearchWorker(QThread):
         query: str,
         match_mode: str,
         ranking: str,
-        college_filter: list[str],
+        college_filter: list[str] | None,
         research_filter: str,
         auto_relax: bool,
         search_field: str = "",
@@ -68,7 +65,7 @@ class SearchWorker(QThread):
                 self.query,
                 match_mode=self.match_mode,
                 ranking=self.ranking,
-                college_filter=self.college_filter if self.college_filter else None,
+                college_filter=self.college_filter,
                 research_filter=self.research_filter,
                 auto_relax=self.auto_relax,
                 search_field=self.search_field,
@@ -94,6 +91,13 @@ class MainWindow(QMainWindow):
         self.search_field = ""  # "" means all fields, "name" / "papers" for field-specific
         self._search_worker: SearchWorker | None = None
         self._baseline_worker: SearchWorker | None = None
+        self._search_request_id = 0
+        self._optimized_pending = False
+        self._baseline_pending = False
+        self._last_query = ""
+        self._last_baseline_label = ""
+        self._last_optimized_label = ""
+        self._updating_college_checks = False
 
         self.setWindowTitle("苏州大学导师信息垂直检索系统")
         self.setMinimumSize(1200, 750)
@@ -168,6 +172,7 @@ class MainWindow(QMainWindow):
         # Theme toggle
         self.theme_btn = QPushButton("切换主题")
         self.theme_btn.setObjectName("themeBtn")
+        self._update_theme_button()
         self.theme_btn.clicked.connect(self._toggle_theme)
         layout.addWidget(self.theme_btn)
 
@@ -179,53 +184,49 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
-        # Match mode
-        match_group = QGroupBox("匹配模式")
-        match_layout = QVBoxLayout(match_group)
-        self.radio_exact = QRadioButton("精确匹配")
-        self.radio_exact.setChecked(True)
-        self.radio_fuzzy = QRadioButton("模糊匹配")
-        match_layout.addWidget(self.radio_exact)
-        match_layout.addWidget(self.radio_fuzzy)
-        layout.addWidget(match_group)
+        match_layout = QVBoxLayout()
+        match_layout.addWidget(self._panel_label("匹配模式"))
+        self.chk_fuzzy_match = QCheckBox("启用模糊匹配")
+        match_layout.addWidget(self.chk_fuzzy_match)
+        layout.addLayout(match_layout)
 
-        # Ranking method
-        rank_group = QGroupBox("排序方式")
-        rank_layout = QVBoxLayout(rank_group)
-        self.radio_bm25 = QRadioButton("BM25")
-        self.radio_bm25.setChecked(True)
-        self.radio_tfidf = QRadioButton("TF-IDF")
-        rank_layout.addWidget(self.radio_bm25)
-        rank_layout.addWidget(self.radio_tfidf)
-        layout.addWidget(rank_group)
+        rank_layout = QVBoxLayout()
+        rank_layout.addWidget(self._panel_label("排序方式"))
+        self.ranking_combo = QComboBox()
+        self.ranking_combo.addItem("BM25", "bm25")
+        self.ranking_combo.addItem("TF-IDF", "tfidf")
+        rank_layout.addWidget(self.ranking_combo)
+        layout.addLayout(rank_layout)
 
-        # Query relaxation
-        relax_group = QGroupBox("查询优化")
-        relax_layout = QVBoxLayout(relax_group)
+        relax_layout = QVBoxLayout()
+        relax_layout.addWidget(self._panel_label("查询优化"))
         self.chk_auto_relax = QCheckBox("结果为空时自动放宽条件")
         self.chk_auto_relax.setChecked(True)
         relax_layout.addWidget(self.chk_auto_relax)
-        layout.addWidget(relax_group)
+        layout.addLayout(relax_layout)
 
         # College filter
-        college_group = QGroupBox("学院过滤")
-        college_layout = QVBoxLayout(college_group)
+        college_layout = QVBoxLayout()
+        college_layout.addWidget(self._panel_label("学院过滤"))
         self.chk_all_colleges = QCheckBox("全部学院")
+        self.chk_all_colleges.setTristate(True)
         self.chk_all_colleges.setChecked(True)
-        self.chk_all_colleges.stateChanged.connect(self._on_college_select_all)
+        self.chk_all_colleges.clicked.connect(self._on_college_select_all_clicked)
         college_layout.addWidget(self.chk_all_colleges)
+
         self.college_checks: list[QCheckBox] = []
         # Will be populated after data load
         self.college_layout = college_layout
-        layout.addWidget(college_group)
+        layout.addLayout(college_layout)
 
         # Research filter
-        research_group = QGroupBox("研究领域过滤")
-        research_layout = QVBoxLayout(research_group)
+        research_layout = QVBoxLayout()
+        research_layout.addWidget(self._panel_label("研究领域过滤"))
         self.research_input = QLineEdit()
         self.research_input.setPlaceholderText("关键词，逗号分隔")
+        self.research_input.setToolTip("仅过滤导师资料中的研究方向字段，多个关键词用英文逗号分隔。")
         research_layout.addWidget(self.research_input)
-        layout.addWidget(research_group)
+        layout.addLayout(research_layout)
 
         # Compare button
         self.compare_btn = QPushButton("查看对比")
@@ -234,7 +235,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.compare_btn)
 
         layout.addStretch()
-        return panel
+
+        scroll = QScrollArea()
+        scroll.setObjectName("optionsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(panel)
+        scroll.setFixedWidth(300)
+        return scroll
 
     def _build_results_area(self) -> QWidget:
         widget = QWidget()
@@ -247,6 +255,7 @@ class MainWindow(QMainWindow):
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.results_table.doubleClicked.connect(self._on_table_double_click)
+        self.results_table.verticalHeader().setVisible(False)
 
         columns = ["姓名", "职称", "学院", "研究方向", "论文代表作（节选）", "联系方式", "操作"]
         self.results_table.setColumnCount(len(columns))
@@ -267,6 +276,11 @@ class MainWindow(QMainWindow):
         self.results_table.setColumnWidth(5, 130)
         self.results_table.setColumnWidth(6, 80)
 
+        self.results_state_label = QLabel("请输入查询词开始检索")
+        self.results_state_label.setObjectName("resultsStateLabel")
+        self.results_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(self.results_state_label)
         layout.addWidget(self.results_table, 1)
 
         # Pagination
@@ -307,8 +321,10 @@ class MainWindow(QMainWindow):
         for college_name in self.college_names:
             chk = QCheckBox(college_name)
             chk.setChecked(True)
+            chk.stateChanged.connect(self._on_college_child_changed)
             self.college_checks.append(chk)
             self.college_layout.addWidget(chk)
+        self._sync_all_colleges_state()
 
         self.status_bar.showMessage(
             f"后端连接成功 — 共 {self.record_count} 位导师，"
@@ -323,17 +339,43 @@ class MainWindow(QMainWindow):
         query = self.search_input.text().strip()
         if not query:
             self.status_bar.showMessage("请输入查询词")
+            self._show_results_state("请输入查询词开始检索")
             return
 
-        match_mode = "fuzzy" if self.radio_fuzzy.isChecked() else "exact"
-        ranking = "tfidf" if self.radio_tfidf.isChecked() else "bm25"
+        match_mode = "fuzzy" if self.chk_fuzzy_match.isChecked() else "exact"
+        ranking = str(self.ranking_combo.currentData() or "bm25")
         college_filter = self._get_college_filter()
         research_filter = self.research_input.text().strip()
         auto_relax = self.chk_auto_relax.isChecked()
+        if college_filter == []:
+            self.current_results = []
+            self.baseline_results = []
+            self.current_page = 0
+            self._last_query = query
+            self._last_baseline_label = ""
+            self._last_optimized_label = ""
+            self._render_page("未选择学院，请至少选择一个学院或勾选全部学院")
+            self.status_bar.showMessage("未选择学院 — 不执行检索")
+            return
 
+        self._search_request_id += 1
+        request_id = self._search_request_id
+        self._optimized_pending = True
+        self._baseline_pending = True
+        self._last_query = query
+        self._last_baseline_label = self._build_baseline_label(
+            ranking, college_filter, research_filter
+        )
+        self._last_optimized_label = self._build_optimized_label(
+            match_mode, ranking, college_filter, research_filter, auto_relax, self.search_field
+        )
+        self.current_results = []
+        self.baseline_results = []
         self.search_btn.setEnabled(False)
         self.search_input.setEnabled(False)
+        self.compare_btn.setEnabled(False)
         self.status_bar.showMessage("正在检索…")
+        self._show_results_state("正在检索…")
 
         # Run optimized search
         self._search_worker = SearchWorker(
@@ -341,22 +383,37 @@ class MainWindow(QMainWindow):
             college_filter, research_filter, auto_relax,
             search_field=self.search_field,
         )
-        self._search_worker.results_ready.connect(self._on_search_done)
-        self._search_worker.error_occurred.connect(self._on_search_error)
+        self._search_worker.results_ready.connect(
+            lambda results, elapsed, mode_info, rid=request_id: self._on_search_done(
+                rid, results, elapsed, mode_info
+            )
+        )
+        self._search_worker.error_occurred.connect(
+            lambda msg, rid=request_id: self._on_search_error(rid, "优化检索", msg)
+        )
         self._search_worker.start()
 
         # Run baseline search in parallel
         self._baseline_worker = SearchWorker(
             self.api_client, query, "exact", ranking,
-            college_filter, "", False, is_baseline=True,
+            college_filter, research_filter, False, search_field=self.search_field, is_baseline=True,
         )
-        self._baseline_worker.results_ready.connect(self._on_baseline_done)
-        self._baseline_worker.error_occurred.connect(self._on_search_error)
+        self._baseline_worker.results_ready.connect(
+            lambda results, elapsed, mode_info, rid=request_id: self._on_baseline_done(
+                rid, results, elapsed, mode_info
+            )
+        )
+        self._baseline_worker.error_occurred.connect(
+            lambda msg, rid=request_id: self._on_search_error(rid, "基础检索", msg)
+        )
         self._baseline_worker.start()
 
-    def _on_search_done(self, results: list[SearchResult], elapsed: float, mode_info: str) -> None:
-        self.search_btn.setEnabled(True)
-        self.search_input.setEnabled(True)
+    def _on_search_done(
+        self, request_id: int, results: list[SearchResult], elapsed: float, mode_info: str
+    ) -> None:
+        if request_id != self._search_request_id:
+            return
+        self._optimized_pending = False
         self.current_results = results
         self.current_page = 0
         self._render_page()
@@ -369,20 +426,34 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(
                 f"检索完成 — 无结果，耗时 {elapsed:.3f}s。尝试切换为模糊匹配或勾选自动放宽条件。"
             )
+        self._update_search_controls()
 
-    def _on_baseline_done(self, results: list[SearchResult], elapsed: float, mode_info: str) -> None:
+    def _on_baseline_done(
+        self, request_id: int, results: list[SearchResult], elapsed: float, mode_info: str
+    ) -> None:
+        if request_id != self._search_request_id:
+            return
+        self._baseline_pending = False
         self.baseline_results = results
+        self._update_search_controls()
 
-    def _on_search_error(self, msg: str) -> None:
-        self.search_btn.setEnabled(True)
-        self.search_input.setEnabled(True)
-        self.status_bar.showMessage(f"检索出错：{msg}")
+    def _on_search_error(self, request_id: int, scope: str, msg: str) -> None:
+        if request_id != self._search_request_id:
+            return
+        self._optimized_pending = False
+        self._baseline_pending = False
+        self.current_results = []
+        self.baseline_results = []
+        self._render_page(f"{scope}出错：{msg}")
+        self.status_bar.showMessage(f"{scope}出错：{msg}")
+        QMessageBox.warning(self, f"{scope}出错", msg)
+        self._update_search_controls()
 
     # ------------------------------------------------------------------
     # Results rendering
     # ------------------------------------------------------------------
 
-    def _render_page(self) -> None:
+    def _render_page(self, empty_message: str | None = None) -> None:
         results = self.current_results
         total = len(results)
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -391,26 +462,29 @@ class MainWindow(QMainWindow):
         page_results = results[start:end]
 
         self.results_table.setRowCount(len(page_results))
+        self._show_results_state(
+            empty_message or ("未找到匹配结果" if total == 0 else "")
+        )
 
         for row, result in enumerate(page_results):
             r = result.record
 
             # Name
-            self.results_table.setItem(row, 0, QTableWidgetItem(r.name))
+            self._set_table_text(row, 0, r.name)
 
             # Career
-            self.results_table.setItem(row, 1, QTableWidgetItem(r.career))
+            self._set_table_text(row, 1, r.career)
 
             # College
-            self.results_table.setItem(row, 2, QTableWidgetItem(r.college))
+            self._set_table_text(row, 2, r.college)
 
             # Research
             research = r.research[:60] + "…" if len(r.research) > 60 else r.research
-            self.results_table.setItem(row, 3, QTableWidgetItem(research))
+            self._set_table_text(row, 3, research, r.research)
 
             # Papers excerpt
             papers = r.papers[:80] + "…" if len(r.papers) > 80 else r.papers
-            self.results_table.setItem(row, 4, QTableWidgetItem(papers))
+            self._set_table_text(row, 4, papers, r.papers)
 
             # Contact (partially hidden)
             email = r.email
@@ -419,7 +493,7 @@ class MainWindow(QMainWindow):
                 masked = local[:2] + "***@" + domain
             else:
                 masked = email or "—"
-            self.results_table.setItem(row, 5, QTableWidgetItem(masked))
+            self._set_table_text(row, 5, masked, r.email or r.phone)
 
             # Detail button
             detail_btn = QPushButton("详情")
@@ -494,11 +568,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先输入查询词并执行搜索")
             return
 
+        if self._optimized_pending or self._baseline_pending:
+            QMessageBox.information(self, "提示", "检索仍在进行，请等待完成后再查看对比")
+            return
+
         if not self.current_results and not self.baseline_results:
             QMessageBox.information(self, "提示", "请先执行搜索")
             return
 
-        dialog = CompareDialog(query, self.baseline_results, self.current_results, self)
+        dialog = CompareDialog(
+            self._last_query or query,
+            self.baseline_results,
+            self.current_results,
+            baseline_label=self._last_baseline_label,
+            optimized_label=self._last_optimized_label,
+            parent=self,
+        )
         dialog.exec()
 
     # ------------------------------------------------------------------
@@ -509,15 +594,101 @@ class MainWindow(QMainWindow):
         """Set the search field (QButtonGroup handles exclusive toggle)."""
         self.search_field = field
 
-    def _get_college_filter(self) -> list[str]:
-        if self.chk_all_colleges.isChecked():
-            return []
+    def _panel_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("panelLabel")
+        return label
+
+    def _get_college_filter(self) -> list[str] | None:
+        if self.chk_all_colleges.checkState() == Qt.CheckState.Checked:
+            return None
         return [chk.text() for chk in self.college_checks if chk.isChecked()]
 
-    def _on_college_select_all(self, state) -> None:
-        checked = state == Qt.CheckState.Checked.value
+    def _on_college_select_all_clicked(self, checked: bool) -> None:
+        self._updating_college_checks = True
         for chk in self.college_checks:
             chk.setChecked(checked)
+        self._updating_college_checks = False
+        self._sync_all_colleges_state()
+
+    def _on_college_child_changed(self) -> None:
+        if not self._updating_college_checks:
+            self._sync_all_colleges_state()
+
+    def _sync_all_colleges_state(self) -> None:
+        self._updating_college_checks = True
+        checked_count = sum(1 for chk in self.college_checks if chk.isChecked())
+        if checked_count == len(self.college_checks):
+            state = Qt.CheckState.Checked
+        elif checked_count == 0:
+            state = Qt.CheckState.Unchecked
+        else:
+            state = Qt.CheckState.PartiallyChecked
+        self.chk_all_colleges.setCheckState(state)
+        self._updating_college_checks = False
+
+    def _set_table_text(
+        self, row: int, column: int, text: str, tooltip: str | None = None
+    ) -> None:
+        item = QTableWidgetItem(text or "—")
+        if tooltip:
+            item.setToolTip(tooltip)
+        self.results_table.setItem(row, column, item)
+
+    def _show_results_state(self, message: str) -> None:
+        self.results_state_label.setText(message)
+        self.results_state_label.setVisible(bool(message))
+
+    def _update_search_controls(self) -> None:
+        running = self._optimized_pending or self._baseline_pending
+        self.search_btn.setEnabled(not running)
+        self.search_input.setEnabled(not running)
+        self.compare_btn.setEnabled(not running)
+
+    def _field_label(self, field: str) -> str:
+        return {"": "全部字段", "name": "姓名", "papers": "论文"}.get(field, field)
+
+    def _college_label(self, college_filter: list[str] | None) -> str:
+        if college_filter is None:
+            return "全部学院"
+        return "学院：" + "、".join(college_filter)
+
+    def _build_baseline_label(
+        self, ranking: str, college_filter: list[str] | None, research_filter: str
+    ) -> str:
+        parts = [
+            "精确匹配",
+            self._ranking_label(ranking),
+            self._college_label(college_filter),
+        ]
+        if research_filter:
+            parts.append(f"研究方向：{research_filter}")
+        parts.append("不应用字段范围")
+        return "基础系统（" + " + ".join(parts) + "）"
+
+    def _build_optimized_label(
+        self,
+        match_mode: str,
+        ranking: str,
+        college_filter: list[str] | None,
+        research_filter: str,
+        auto_relax: bool,
+        search_field: str,
+    ) -> str:
+        parts = [
+            "模糊匹配" if match_mode == "fuzzy" else "精确匹配",
+            self._ranking_label(ranking),
+            f"范围：{self._field_label(search_field)}",
+            self._college_label(college_filter),
+        ]
+        if research_filter:
+            parts.append(f"研究方向：{research_filter}")
+        if auto_relax:
+            parts.append("允许自动放宽")
+        return "优化系统（" + " + ".join(parts) + "）"
+
+    def _ranking_label(self, ranking: str) -> str:
+        return {"bm25": "BM25", "tfidf": "TF-IDF"}.get(ranking, ranking.upper())
 
     # ------------------------------------------------------------------
     # Theme
@@ -527,9 +698,12 @@ class MainWindow(QMainWindow):
         # Cycle: auto -> dark -> light -> auto
         cycle = {"auto": "dark", "dark": "light", "light": "auto"}
         self._current_theme = cycle.get(self._current_theme, "auto")
+        self._update_theme_button()
+        self._apply_theme()
+
+    def _update_theme_button(self) -> None:
         theme_labels = {"auto": "跟随系统", "dark": "暗色", "light": "亮色"}
         self.theme_btn.setText(f"主题：{theme_labels[self._current_theme]}")
-        self._apply_theme()
 
     def _apply_theme(self) -> None:
         import qdarktheme

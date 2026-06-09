@@ -94,6 +94,7 @@ class SearchApi:
                 query,
                 ranking=ranking,
                 college_filter=college_filter,
+                research_filter=str(payload.get("research_filter", "")),
                 top_k=int(payload.get("top_k", 50)),
             )
         else:
