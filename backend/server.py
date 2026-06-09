@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from backend.experimental_query import ExperimentalQueryIndex
 from backend.search_engine import SearchEngine, SearchResult, TeacherRecord
 
 
@@ -64,12 +65,17 @@ class SearchApi:
     def __init__(self, data_dir: str | Path | None = None):
         self.engine = SearchEngine(data_dir)
         self.engine.load_data()
+        self.experimental_index = ExperimentalQueryIndex(data_dir=data_dir)
+        self.experimental_index.load()
 
     def metadata(self) -> dict[str, Any]:
         return {
             "record_count": len(self.engine.records),
             "college_names": self.engine.college_names,
         }
+
+    def experimental_query(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.experimental_index.query(payload)
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = str(payload.get("query", "")).strip()
@@ -122,13 +128,16 @@ def make_handler(api: SearchApi) -> type[BaseHTTPRequestHandler]:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
 
         def do_POST(self) -> None:
-            if self.path != "/search":
+            if self.path not in {"/search", "/experimental-query", "/query"}:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
                 return
 
             try:
                 payload = self._read_json()
-                self._send_json(api.search(payload))
+                if self.path in {"/experimental-query", "/query"}:
+                    self._send_json(api.experimental_query(payload))
+                else:
+                    self._send_json(api.search(payload))
             except ValueError as exc:
                 self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             except Exception as exc:
@@ -155,7 +164,9 @@ def make_handler(api: SearchApi) -> type[BaseHTTPRequestHandler]:
                 raise ValueError("request body must be a JSON object")
             return payload
 
-        def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        def _send_json(
+            self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK
+        ) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self._send_common_headers()
@@ -192,7 +203,9 @@ def run_server(
         server.socket = context.wrap_socket(server.socket, server_side=True)
         scheme = "https"
 
-    print(f"IR backend serving {len(api.engine.records)} records at {scheme}://{host}:{port}")
+    print(
+        f"IR backend serving {len(api.engine.records)} records at {scheme}://{host}:{port}"
+    )
     server.serve_forever()
 
 

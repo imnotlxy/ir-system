@@ -12,4 +12,5 @@ dependencies = [
 
 [project.scripts]
 ir-backend = "backend.server:main"
+ir-build-experimental-index = "backend.experimental_query:main"
 ir-client = "main:main"
