@@ -89,6 +89,7 @@ class CompareDialog(QDialog):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         header = table.horizontalHeader()
+        assert header is not None
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
@@ -97,7 +98,9 @@ class CompareDialog(QDialog):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        table.verticalHeader().setVisible(False)
+        vertical_header = table.verticalHeader()
+        assert vertical_header is not None
+        vertical_header.setVisible(False)
         table.setColumnWidth(0, 50)
         table.setColumnWidth(1, 80)
         table.setColumnWidth(2, 70)

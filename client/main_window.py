@@ -255,13 +255,16 @@ class MainWindow(QMainWindow):
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.results_table.doubleClicked.connect(self._on_table_double_click)
-        self.results_table.verticalHeader().setVisible(False)
+        vertical_header = self.results_table.verticalHeader()
+        assert vertical_header is not None
+        vertical_header.setVisible(False)
 
         columns = ["姓名", "职称", "学院", "研究方向", "论文代表作（节选）", "联系方式", "操作"]
         self.results_table.setColumnCount(len(columns))
         self.results_table.setHorizontalHeaderLabels(columns)
 
         header = self.results_table.horizontalHeader()
+        assert header is not None
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
@@ -509,8 +512,10 @@ class MainWindow(QMainWindow):
         # Clear old buttons
         while self.page_layout_inner.count():
             item = self.page_layout_inner.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            assert item is not None
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
 
         # Prev button
         prev_btn = QPushButton("上一页")
