@@ -7,10 +7,24 @@ import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
 from difflib import get_close_matches
+from pathlib import Path
 
 import jieba
+
+SEARCH_INDEX_SCHEMA_VERSION = 1
+DEFAULT_SEARCH_INDEX_SUBDIR = "search_index"
+DEFAULT_SEARCH_INDEX_FILENAME = "index.json"
+
+
+def default_search_index_path(data_dir: str | Path | None = None) -> Path:
+    """Return the default cached search-index path."""
+    root = (
+        Path(data_dir)
+        if data_dir is not None
+        else Path(__file__).resolve().parents[1] / "data"
+    )
+    return root / DEFAULT_SEARCH_INDEX_SUBDIR / DEFAULT_SEARCH_INDEX_FILENAME
 
 
 @dataclass
@@ -50,10 +64,19 @@ class SearchResult:
 class SearchEngine:
     """Full-text search engine with BM25, TF-IDF, fuzzy matching, and query relaxation."""
 
-    def __init__(self, data_dir: str | Path | None = None):
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        index_path: str | Path | None = None,
+    ):
         if data_dir is None:
             data_dir = Path(__file__).resolve().parents[1] / "data"
         self.data_dir = Path(data_dir)
+        self.index_path = (
+            Path(index_path)
+            if index_path is not None
+            else default_search_index_path(self.data_dir)
+        )
         self.records: list[TeacherRecord] = []
         self.inverted_index: dict[str, set[int]] = defaultdict(set)
         self.doc_freq: dict[str, int] = defaultdict(int)
@@ -67,15 +90,17 @@ class SearchEngine:
     # ------------------------------------------------------------------
 
     def load_data(self) -> None:
-        """Load teacher data from JSONL and build the index."""
+        """Load teacher data from JSONL and reuse or rebuild the cached index."""
         jsonl_path = self.data_dir / "teachers.jsonl"
         if not jsonl_path.exists():
             raise FileNotFoundError(f"Data file not found: {jsonl_path}")
 
+        source_signature = self._source_signature(jsonl_path)
+        cached_payload = self._read_index_cache(source_signature)
+        use_cache = cached_payload is not None
+
         self.records.clear()
-        self.inverted_index.clear()
-        self.doc_freq.clear()
-        self.doc_lengths.clear()
+        self._reset_index_state()
 
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -83,10 +108,114 @@ class SearchEngine:
                 if not line:
                     continue
                 raw = json.loads(line)
-                record = self._parse_record(raw)
+                record = self._parse_record(raw, tokenize=not use_cache)
                 self.records.append(record)
 
-        # Build inverted index
+        if cached_payload is not None:
+            try:
+                self._apply_index_cache(cached_payload)
+            except ValueError:
+                use_cache = False
+                self.records = [
+                    self._parse_record(record.raw, tokenize=True)
+                    for record in self.records
+                ]
+
+        if not use_cache:
+            self._build_index_state()
+            self._write_index_cache(source_signature)
+
+        self._loaded = True
+
+    @staticmethod
+    def _source_signature(jsonl_path: Path) -> dict[str, int]:
+        stat = jsonl_path.stat()
+        return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+    def _reset_index_state(self) -> None:
+        self.inverted_index = defaultdict(set)
+        self.doc_freq = defaultdict(int)
+        self.doc_lengths = []
+        self.avg_dl = 0.0
+        self.college_names = []
+
+    def _read_index_cache(self, source_signature: dict[str, int]) -> dict | None:
+        if not self.index_path.exists():
+            return None
+        try:
+            payload = json.loads(self.index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if int(payload.get("schema_version") or 0) != SEARCH_INDEX_SCHEMA_VERSION:
+            return None
+        if payload.get("source") != "teachers.jsonl":
+            return None
+        if payload.get("tokenizer") != "jieba-v1":
+            return None
+        if payload.get("source_signature") != source_signature:
+            return None
+        return payload
+
+    def _apply_index_cache(self, payload: dict) -> None:
+        record_count = payload.get("record_count")
+        record_tokens = payload.get("record_tokens")
+        field_tokens = payload.get("field_tokens")
+        raw_index = payload.get("index")
+        raw_doc_freq = payload.get("doc_freq")
+        doc_lengths = payload.get("doc_lengths")
+        college_names = payload.get("college_names")
+        avg_dl = payload.get("avg_dl")
+
+        if record_count != len(self.records):
+            raise ValueError("Cached search index record count does not match data")
+        if not isinstance(record_tokens, list) or len(record_tokens) != len(
+            self.records
+        ):
+            raise ValueError("Cached search index has invalid record tokens")
+        if not isinstance(field_tokens, list) or len(field_tokens) != len(self.records):
+            raise ValueError("Cached search index has invalid field tokens")
+        if not isinstance(raw_index, dict) or not isinstance(raw_doc_freq, dict):
+            raise ValueError("Cached search index has invalid postings")
+        if not isinstance(doc_lengths, list) or len(doc_lengths) != len(self.records):
+            raise ValueError("Cached search index has invalid document lengths")
+        if not isinstance(college_names, list):
+            raise ValueError("Cached search index has invalid college names")
+
+        for idx, tokens in enumerate(record_tokens):
+            if not isinstance(tokens, list):
+                raise ValueError("Cached search index has invalid record token list")
+            self.records[idx].tokens = [str(token) for token in tokens]
+
+        for idx, fields in enumerate(field_tokens):
+            if not isinstance(fields, dict):
+                raise ValueError("Cached search index has invalid field token map")
+            self.records[idx].field_tokens = {
+                str(field): [str(token) for token in tokens]
+                for field, tokens in fields.items()
+                if isinstance(tokens, list)
+            }
+
+        inverted_index: dict[str, set[int]] = {}
+        for token, doc_ids in raw_index.items():
+            if not isinstance(doc_ids, list):
+                continue
+            postings = {int(doc_id) for doc_id in doc_ids}
+            if any(doc_id < 0 or doc_id >= len(self.records) for doc_id in postings):
+                raise ValueError("Cached search index has out-of-range postings")
+            inverted_index[str(token)] = postings
+        self.inverted_index = defaultdict(set, inverted_index)
+        self.doc_freq = defaultdict(
+            int,
+            {str(token): int(freq) for token, freq in raw_doc_freq.items()},
+        )
+        self.doc_lengths = [int(length) for length in doc_lengths]
+        self.avg_dl = float(avg_dl) if isinstance(avg_dl, int | float) else 1.0
+        self.college_names = [str(name) for name in college_names]
+
+    def _build_index_state(self) -> None:
+        self._reset_index_state()
         for idx, record in enumerate(self.records):
             token_set = set(record.tokens)
             self.doc_lengths.append(len(record.tokens))
@@ -97,17 +226,39 @@ class SearchEngine:
         total = sum(self.doc_lengths) if self.doc_lengths else 1
         self.avg_dl = total / len(self.doc_lengths) if self.doc_lengths else 1.0
 
-        # Extract unique college names
         seen: set[str] = set()
-        self.college_names = []
-        for r in self.records:
-            if r.college and r.college not in seen:
-                seen.add(r.college)
-                self.college_names.append(r.college)
+        for record in self.records:
+            if record.college and record.college not in seen:
+                seen.add(record.college)
+                self.college_names.append(record.college)
 
-        self._loaded = True
+    def _write_index_cache(self, source_signature: dict[str, int]) -> None:
+        payload = {
+            "schema_version": SEARCH_INDEX_SCHEMA_VERSION,
+            "source": "teachers.jsonl",
+            "source_signature": source_signature,
+            "tokenizer": "jieba-v1",
+            "record_count": len(self.records),
+            "doc_lengths": self.doc_lengths,
+            "avg_dl": self.avg_dl,
+            "college_names": self.college_names,
+            "record_tokens": [record.tokens for record in self.records],
+            "field_tokens": [record.field_tokens for record in self.records],
+            "doc_freq": dict(sorted(self.doc_freq.items())),
+            "index": {
+                token: sorted(doc_ids)
+                for token, doc_ids in sorted(self.inverted_index.items())
+            },
+        }
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.index_path.with_suffix(self.index_path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        tmp_path.replace(self.index_path)
 
-    def _parse_record(self, raw: dict) -> TeacherRecord:
+    def _parse_record(self, raw: dict, *, tokenize: bool = True) -> TeacherRecord:
         """Parse a raw JSON record into a TeacherRecord."""
         if int(raw.get("schema_version") or 1) >= 2:
             profile = raw.get("profile", {})
@@ -148,33 +299,53 @@ class SearchEngine:
             search_text = raw.get("search_text", "")
             detail_url = raw.get("detail_url", "")
 
-        # Build a combined text for indexing
         works_text = " ".join(representative_works)
         section_text = " ".join(
             paragraph
             for section in sections
             for paragraph in section.get("paragraphs", [])
         )
-        combined = " ".join(
-            filter(None, [name, career, college, gender, research, works_text, education, intro, projects, section_text, search_text])
-        )
-        tokens = self._tokenize(combined)
+        tokens: list[str] = []
+        field_tokens: dict[str, list[str]] = {}
+        if tokenize:
+            combined = " ".join(
+                filter(
+                    None,
+                    [
+                        name,
+                        career,
+                        college,
+                        gender,
+                        research,
+                        works_text,
+                        education,
+                        intro,
+                        projects,
+                        section_text,
+                        search_text,
+                    ],
+                )
+            )
+            tokens = self._tokenize(combined)
 
-        # Build per-field tokens for field-specific search
-        field_tokens = {
-            "name": self._tokenize(name),
-            "papers": self._tokenize(works_text),
-            "works": self._tokenize(works_text),
-            "research": self._tokenize(research),
-            "college": self._tokenize(college),
-            "career": self._tokenize(career),
-            "title": self._tokenize(career),
-            "education": self._tokenize(education),
-            "intro": self._tokenize(intro),
-            "projects": self._tokenize(projects),
-            "profile": self._tokenize(" ".join(filter(None, [name, career, college, gender, email, phone]))),
-            "text": self._tokenize(section_text or search_text),
-        }
+            field_tokens = {
+                "name": self._tokenize(name),
+                "papers": self._tokenize(works_text),
+                "works": self._tokenize(works_text),
+                "research": self._tokenize(research),
+                "college": self._tokenize(college),
+                "career": self._tokenize(career),
+                "title": self._tokenize(career),
+                "education": self._tokenize(education),
+                "intro": self._tokenize(intro),
+                "projects": self._tokenize(projects),
+                "profile": self._tokenize(
+                    " ".join(
+                        filter(None, [name, career, college, gender, email, phone])
+                    )
+                ),
+                "text": self._tokenize(section_text or search_text),
+            }
 
         return TeacherRecord(
             raw=raw,
@@ -219,7 +390,9 @@ class SearchEngine:
             if section.get("text"):
                 paragraphs.append(section["text"])
             if section.get("title") or paragraphs:
-                result.append({"heading": section.get("title", ""), "paragraphs": paragraphs})
+                result.append(
+                    {"heading": section.get("title", ""), "paragraphs": paragraphs}
+                )
         return result
 
     @staticmethod
@@ -271,10 +444,10 @@ class SearchEngine:
         n = len(self.records)
         doc_tokens = self.records[doc_idx].tokens
         doc_counter = Counter(doc_tokens)
-        doc_len = math.sqrt(sum(v ** 2 for v in doc_counter.values())) or 1.0
+        doc_len = math.sqrt(sum(v**2 for v in doc_counter.values())) or 1.0
 
         query_counter = Counter(query_tokens)
-        query_len = math.sqrt(sum(v ** 2 for v in query_counter.values())) or 1.0
+        query_len = math.sqrt(sum(v**2 for v in query_counter.values())) or 1.0
 
         score = 0.0
         for term, qtf in query_counter.items():
@@ -338,16 +511,23 @@ class SearchEngine:
         # Field-specific search
         if search_field:
             return self._field_search(
-                query_tokens, field=search_field, ranking=ranking,
-                match_mode=match_mode, college_filter=college_filter,
-                research_filter=research_filter, auto_relax=auto_relax,
+                query_tokens,
+                field=search_field,
+                ranking=ranking,
+                match_mode=match_mode,
+                college_filter=college_filter,
+                research_filter=research_filter,
+                auto_relax=auto_relax,
                 top_k=top_k,
             )
 
         # Phase 1: exact search
         results = self._ranked_search(
-            query_tokens, ranking=ranking, match_mode="exact",
-            college_filter=college_filter, research_filter=research_filter,
+            query_tokens,
+            ranking=ranking,
+            match_mode="exact",
+            college_filter=college_filter,
+            research_filter=research_filter,
         )
 
         if results:
@@ -357,8 +537,11 @@ class SearchEngine:
         if match_mode == "fuzzy":
             fuzzy_tokens = self._fuzzy_expand(query_tokens)
             results = self._ranked_search(
-                fuzzy_tokens, ranking=ranking, match_mode="fuzzy",
-                college_filter=college_filter, research_filter=research_filter,
+                fuzzy_tokens,
+                ranking=ranking,
+                match_mode="fuzzy",
+                college_filter=college_filter,
+                research_filter=research_filter,
             )
             if results:
                 return results[:top_k]
@@ -366,8 +549,10 @@ class SearchEngine:
         # Still no results — try query relaxation (OR instead of AND)
         if auto_relax:
             results = self._relaxed_search(
-                query_tokens, ranking=ranking,
-                college_filter=college_filter, research_filter=research_filter,
+                query_tokens,
+                ranking=ranking,
+                college_filter=college_filter,
+                research_filter=research_filter,
             )
             if results:
                 return results[:top_k]
@@ -375,8 +560,10 @@ class SearchEngine:
             if match_mode == "fuzzy":
                 fuzzy_tokens = self._fuzzy_expand(query_tokens)
                 results = self._relaxed_search(
-                    fuzzy_tokens, ranking=ranking,
-                    college_filter=college_filter, research_filter=research_filter,
+                    fuzzy_tokens,
+                    ranking=ranking,
+                    college_filter=college_filter,
+                    research_filter=research_filter,
                 )
                 if results:
                     return results[:top_k]
@@ -401,8 +588,11 @@ class SearchEngine:
             return []
 
         results = self._ranked_search(
-            query_tokens, ranking=ranking, match_mode="exact",
-            college_filter=college_filter, research_filter=research_filter,
+            query_tokens,
+            ranking=ranking,
+            match_mode="exact",
+            college_filter=college_filter,
+            research_filter=research_filter,
         )
         return results[:top_k]
 
@@ -435,10 +625,14 @@ class SearchEngine:
         # Apply filters
         if college_filter:
             college_set = set(college_filter)
-            candidates = {idx for idx in candidates if self.records[idx].college in college_set}
+            candidates = {
+                idx for idx in candidates if self.records[idx].college in college_set
+            }
 
         if research_filter:
-            research_keywords = [kw.strip().lower() for kw in research_filter.split(",") if kw.strip()]
+            research_keywords = [
+                kw.strip().lower() for kw in research_filter.split(",") if kw.strip()
+            ]
             if research_keywords:
                 filtered = set()
                 for idx in candidates:
@@ -454,14 +648,18 @@ class SearchEngine:
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx) + self._name_match_boost(query_tokens, self.records[idx])
+            score = score_fn(query_tokens, idx) + self._name_match_boost(
+                query_tokens, self.records[idx]
+            )
             if score > 0:
-                results.append(SearchResult(
-                    record=self.records[idx],
-                    score=score,
-                    match_mode=match_mode,
-                    relaxed=False,
-                ))
+                results.append(
+                    SearchResult(
+                        record=self.records[idx],
+                        score=score,
+                        match_mode=match_mode,
+                        relaxed=False,
+                    )
+                )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results
@@ -485,10 +683,14 @@ class SearchEngine:
 
         if college_filter:
             college_set = set(college_filter)
-            candidates = {idx for idx in candidates if self.records[idx].college in college_set}
+            candidates = {
+                idx for idx in candidates if self.records[idx].college in college_set
+            }
 
         if research_filter:
-            research_keywords = [kw.strip().lower() for kw in research_filter.split(",") if kw.strip()]
+            research_keywords = [
+                kw.strip().lower() for kw in research_filter.split(",") if kw.strip()
+            ]
             if research_keywords:
                 filtered = set()
                 for idx in candidates:
@@ -503,14 +705,18 @@ class SearchEngine:
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx) + self._name_match_boost(query_tokens, self.records[idx])
+            score = score_fn(query_tokens, idx) + self._name_match_boost(
+                query_tokens, self.records[idx]
+            )
             if score > 0:
-                results.append(SearchResult(
-                    record=self.records[idx],
-                    score=score,
-                    match_mode="relaxed",
-                    relaxed=True,
-                ))
+                results.append(
+                    SearchResult(
+                        record=self.records[idx],
+                        score=score,
+                        match_mode="relaxed",
+                        relaxed=True,
+                    )
+                )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results
@@ -566,10 +772,14 @@ class SearchEngine:
 
         if college_filter:
             college_set = set(college_filter)
-            candidates = {idx for idx in candidates if self.records[idx].college in college_set}
+            candidates = {
+                idx for idx in candidates if self.records[idx].college in college_set
+            }
 
         if research_filter:
-            research_keywords = [kw.strip().lower() for kw in research_filter.split(",") if kw.strip()]
+            research_keywords = [
+                kw.strip().lower() for kw in research_filter.split(",") if kw.strip()
+            ]
             if research_keywords:
                 filtered = set()
                 for idx in candidates:
@@ -587,12 +797,14 @@ class SearchEngine:
         for idx in candidates:
             score = score_fn(query_tokens, idx)
             if score > 0:
-                results.append(SearchResult(
-                    record=self.records[idx],
-                    score=score,
-                    match_mode=f"field:{field}",
-                    relaxed=False,
-                ))
+                results.append(
+                    SearchResult(
+                        record=self.records[idx],
+                        score=score,
+                        match_mode=f"field:{field}",
+                        relaxed=False,
+                    )
+                )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_k]

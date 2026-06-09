@@ -29,6 +29,27 @@ uv run ir-client --api-url http://127.0.0.1:8000
 - `GET /metadata`：返回导师总数和学院列表。
 - `POST /search`：执行检索，请求体为 JSON，支持 `query`、`match_mode`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`、`baseline`。
 
+  主搜索引擎会把分词结果、倒排索引、文档频率、文档长度和学院列表缓存到 `data/search_index/index.json`。启动后端或调用 `SearchEngine.load_data()` 时，如果缓存与 `data/teachers.jsonl` 的大小和修改时间匹配，会直接加载缓存；否则会自动重建并写回 `data/`。
+
+- `POST /experimental-query`：实验性模拟查询接口，基于预构建倒排索引，兼容别名 `POST /query`。请求体示例：
+
+  ```json
+  {
+    "name": "xxx",
+    "collegeId": 1,
+    "keywords": ["xxx", "yyy"]
+  }
+  ```
+
+  `name` 和 `collegeId` 可为 `null`；`keywords` 中所有关键词按 OR 连接。返回体为 `{ "results": [...] }`，结果条目与 `data/teachers_by_college/` 中教师记录保持一致，但移除了 `text`、`detail_fields`、`detail_sections`、`search_text` 等正文内容字段。
+
+  倒排索引预构建在 `data/experimental_query_index/index.json`。如果 `data/teachers_by_college/` 更新，可重新生成：
+
+  ```bash
+  uv run python -m backend.experimental_query
+  # 或安装脚本后：uv run ir-build-experimental-index
+  ```
+
 ## 爬虫与数据结构
 
 爬虫位于 `crawler/suda_teachers.py`。重新爬取会保存原始 HTML，并输出 v2 JSONL：
