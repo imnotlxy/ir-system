@@ -389,6 +389,7 @@ class SearchEngine:
         *,
         ranking: str = "bm25",
         college_filter: list[str] | None = None,
+        research_filter: str = "",
         top_k: int = 50,
     ) -> list[SearchResult]:
         """Baseline search: exact match only, no fuzzy, no relaxation."""
@@ -401,7 +402,7 @@ class SearchEngine:
 
         results = self._ranked_search(
             query_tokens, ranking=ranking, match_mode="exact",
-            college_filter=college_filter, research_filter="",
+            college_filter=college_filter, research_filter=research_filter,
         )
         return results[:top_k]
 

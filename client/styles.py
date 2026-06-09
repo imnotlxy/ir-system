@@ -7,7 +7,6 @@
 ADDITIONAL_QSS = """
 /* ---- Font ---- */
 QWidget {
-    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 13px;
 }
 
@@ -35,29 +34,30 @@ QPushButton#fieldBtn:checked {
     font-weight: bold;
 }
 
-/* ---- Group boxes ---- */
-QGroupBox {
-    border-radius: 8px;
-    margin-top: 12px;
-    padding-top: 18px;
+/* ---- Option panel ---- */
+QLabel#panelLabel {
     font-weight: bold;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 14px;
-    padding: 0 6px;
+    font-size: 13px;
+    margin-top: 6px;
+    margin-bottom: 2px;
 }
 
 /* ---- Combo box ---- */
 QComboBox {
-    padding: 5px 10px;
+    padding: 4px 8px;
     border-radius: 5px;
-    min-width: 140px;
+    min-width: 120px;
 }
 
 /* ---- Check / Radio ---- */
-QCheckBox, QRadioButton {
+QCheckBox {
     spacing: 6px;
+}
+
+/* ---- Option panel scroll area ---- */
+QScrollArea#optionsScroll {
+    border: none;
+    background: transparent;
 }
 
 /* ---- Table ---- */
@@ -75,6 +75,10 @@ QTableWidget QPushButton {
     border-radius: 4px;
     padding: 4px 12px;
     font-size: 12px;
+}
+QLabel#resultsStateLabel {
+    padding: 10px;
+    font-size: 13px;
 }
 
 /* ---- Status bar ---- */
@@ -128,5 +132,9 @@ QLabel#compareSummary {
     font-size: 14px;
     font-weight: bold;
     padding: 8px;
+}
+QLabel#compareConfig {
+    font-size: 12px;
+    padding: 2px 4px 6px 4px;
 }
 """
