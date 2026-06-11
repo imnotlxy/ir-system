@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
 )
 
 from client.api_client import SearchApiClient, SearchResult
-from client.compare_dialog import CompareDialog
 from client.detail_dialog import DetailDialog
 from client.styles import ADDITIONAL_QSS
 
@@ -40,36 +39,30 @@ class SearchWorker(QThread):
         self,
         api_client: SearchApiClient,
         query: str,
-        match_mode: str,
         ranking: str,
         college_filter: list[str] | None,
         research_filter: str,
         auto_relax: bool,
         search_field: str = "",
-        is_baseline: bool = False,
     ):
         super().__init__()
         self.api_client = api_client
         self.query = query
-        self.match_mode = match_mode
         self.ranking = ranking
         self.college_filter = college_filter
         self.research_filter = research_filter
         self.auto_relax = auto_relax
         self.search_field = search_field
-        self.is_baseline = is_baseline
 
     def run(self) -> None:
         try:
             results, elapsed, mode_info = self.api_client.search(
                 self.query,
-                match_mode=self.match_mode,
                 ranking=self.ranking,
                 college_filter=self.college_filter,
                 research_filter=self.research_filter,
                 auto_relax=self.auto_relax,
                 search_field=self.search_field,
-                baseline=self.is_baseline,
             )
             self.results_ready.emit(results, elapsed, mode_info)
         except Exception as e:
@@ -82,21 +75,17 @@ class MainWindow(QMainWindow):
     def __init__(self, api_url: str = "http://127.0.0.1:8000"):
         super().__init__()
         self.api_client = SearchApiClient(api_url)
+        self.advanced = False  # Will be set from backend metadata
         self.record_count = 0
         self.college_names: list[str] = []
         self.current_results: list[SearchResult] = []
-        self.baseline_results: list[SearchResult] = []
         self.current_page = 0
         self._current_theme = "auto"  # "auto", "dark", "light"
         self.search_field = ""  # "" means all fields, "name" / "papers" for field-specific
         self._search_worker: SearchWorker | None = None
-        self._baseline_worker: SearchWorker | None = None
         self._search_request_id = 0
-        self._optimized_pending = False
-        self._baseline_pending = False
+        self._search_pending = False
         self._last_query = ""
-        self._last_baseline_label = ""
-        self._last_optimized_label = ""
         self._updating_college_checks = False
 
         self.setWindowTitle("苏州大学导师信息垂直检索系统")
@@ -184,11 +173,14 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
-        match_layout = QVBoxLayout()
-        match_layout.addWidget(self._panel_label("匹配模式"))
-        self.chk_fuzzy_match = QCheckBox("启用模糊匹配")
-        match_layout.addWidget(self.chk_fuzzy_match)
-        layout.addLayout(match_layout)
+        self.match_widget = QWidget()
+        match_layout = QVBoxLayout(self.match_widget)
+        match_layout.setContentsMargins(0, 0, 0, 0)
+        match_layout.addWidget(self._panel_label("查询优化"))
+        self.chk_auto_relax = QCheckBox("模糊查询")
+        self.chk_auto_relax.setChecked(True)
+        match_layout.addWidget(self.chk_auto_relax)
+        layout.addWidget(self.match_widget)
 
         rank_layout = QVBoxLayout()
         rank_layout.addWidget(self._panel_label("排序方式"))
@@ -197,13 +189,6 @@ class MainWindow(QMainWindow):
         self.ranking_combo.addItem("TF-IDF", "tfidf")
         rank_layout.addWidget(self.ranking_combo)
         layout.addLayout(rank_layout)
-
-        relax_layout = QVBoxLayout()
-        relax_layout.addWidget(self._panel_label("查询优化"))
-        self.chk_auto_relax = QCheckBox("结果为空时自动放宽条件")
-        self.chk_auto_relax.setChecked(True)
-        relax_layout.addWidget(self.chk_auto_relax)
-        layout.addLayout(relax_layout)
 
         # College filter
         college_layout = QVBoxLayout()
@@ -227,12 +212,6 @@ class MainWindow(QMainWindow):
         self.research_input.setToolTip("仅过滤导师资料中的研究方向字段，多个关键词用英文逗号分隔。")
         research_layout.addWidget(self.research_input)
         layout.addLayout(research_layout)
-
-        # Compare button
-        self.compare_btn = QPushButton("查看对比")
-        self.compare_btn.setObjectName("compareBtn")
-        self.compare_btn.clicked.connect(self._on_compare)
-        layout.addWidget(self.compare_btn)
 
         layout.addStretch()
 
@@ -318,6 +297,10 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("后端连接失败")
             return
 
+        # Read advanced flag from backend
+        self.advanced = bool(metadata.get("advanced", False))
+        self.match_widget.setVisible(self.advanced)
+
         # Populate college checkboxes
         self.record_count = int(metadata.get("record_count") or 0)
         self.college_names = list(metadata.get("college_names") or [])
@@ -345,44 +328,30 @@ class MainWindow(QMainWindow):
             self._show_results_state("请输入查询词开始检索")
             return
 
-        match_mode = "fuzzy" if self.chk_fuzzy_match.isChecked() else "exact"
         ranking = str(self.ranking_combo.currentData() or "bm25")
         college_filter = self._get_college_filter()
         research_filter = self.research_input.text().strip()
-        auto_relax = self.chk_auto_relax.isChecked()
+        auto_relax = self.chk_auto_relax.isChecked() if self.advanced else False
         if college_filter == []:
             self.current_results = []
-            self.baseline_results = []
             self.current_page = 0
             self._last_query = query
-            self._last_baseline_label = ""
-            self._last_optimized_label = ""
             self._render_page("未选择学院，请至少选择一个学院或勾选全部学院")
             self.status_bar.showMessage("未选择学院 — 不执行检索")
             return
 
         self._search_request_id += 1
         request_id = self._search_request_id
-        self._optimized_pending = True
-        self._baseline_pending = True
+        self._search_pending = True
         self._last_query = query
-        self._last_baseline_label = self._build_baseline_label(
-            ranking, college_filter, research_filter
-        )
-        self._last_optimized_label = self._build_optimized_label(
-            match_mode, ranking, college_filter, research_filter, auto_relax, self.search_field
-        )
         self.current_results = []
-        self.baseline_results = []
         self.search_btn.setEnabled(False)
         self.search_input.setEnabled(False)
-        self.compare_btn.setEnabled(False)
         self.status_bar.showMessage("正在检索…")
         self._show_results_state("正在检索…")
 
-        # Run optimized search
         self._search_worker = SearchWorker(
-            self.api_client, query, match_mode, ranking,
+            self.api_client, query, ranking,
             college_filter, research_filter, auto_relax,
             search_field=self.search_field,
         )
@@ -392,31 +361,16 @@ class MainWindow(QMainWindow):
             )
         )
         self._search_worker.error_occurred.connect(
-            lambda msg, rid=request_id: self._on_search_error(rid, "优化检索", msg)
+            lambda msg, rid=request_id: self._on_search_error(rid, msg)
         )
         self._search_worker.start()
-
-        # Run baseline search in parallel
-        self._baseline_worker = SearchWorker(
-            self.api_client, query, "exact", ranking,
-            college_filter, research_filter, False, search_field=self.search_field, is_baseline=True,
-        )
-        self._baseline_worker.results_ready.connect(
-            lambda results, elapsed, mode_info, rid=request_id: self._on_baseline_done(
-                rid, results, elapsed, mode_info
-            )
-        )
-        self._baseline_worker.error_occurred.connect(
-            lambda msg, rid=request_id: self._on_search_error(rid, "基础检索", msg)
-        )
-        self._baseline_worker.start()
 
     def _on_search_done(
         self, request_id: int, results: list[SearchResult], elapsed: float, mode_info: str
     ) -> None:
         if request_id != self._search_request_id:
             return
-        self._optimized_pending = False
+        self._search_pending = False
         self.current_results = results
         self.current_page = 0
         self._render_page()
@@ -427,29 +381,19 @@ class MainWindow(QMainWindow):
             )
         else:
             self.status_bar.showMessage(
-                f"检索完成 — 无结果，耗时 {elapsed:.3f}s。尝试切换为模糊匹配或勾选自动放宽条件。"
+                f"检索完成 — 无结果，耗时 {elapsed:.3f}s。"
+                + ("尝试勾选自动放宽条件。" if self.advanced else "")
             )
         self._update_search_controls()
 
-    def _on_baseline_done(
-        self, request_id: int, results: list[SearchResult], elapsed: float, mode_info: str
-    ) -> None:
+    def _on_search_error(self, request_id: int, msg: str) -> None:
         if request_id != self._search_request_id:
             return
-        self._baseline_pending = False
-        self.baseline_results = results
-        self._update_search_controls()
-
-    def _on_search_error(self, request_id: int, scope: str, msg: str) -> None:
-        if request_id != self._search_request_id:
-            return
-        self._optimized_pending = False
-        self._baseline_pending = False
+        self._search_pending = False
         self.current_results = []
-        self.baseline_results = []
-        self._render_page(f"{scope}出错：{msg}")
-        self.status_bar.showMessage(f"{scope}出错：{msg}")
-        QMessageBox.warning(self, f"{scope}出错", msg)
+        self._render_page(f"检索出错：{msg}")
+        self.status_bar.showMessage(f"检索出错：{msg}")
+        QMessageBox.warning(self, "检索出错", msg)
         self._update_search_controls()
 
     # ------------------------------------------------------------------
@@ -564,34 +508,6 @@ class MainWindow(QMainWindow):
             self._show_detail(self.current_results[actual_idx].record)
 
     # ------------------------------------------------------------------
-    # Compare dialog
-    # ------------------------------------------------------------------
-
-    def _on_compare(self) -> None:
-        query = self.search_input.text().strip()
-        if not query:
-            QMessageBox.information(self, "提示", "请先输入查询词并执行搜索")
-            return
-
-        if self._optimized_pending or self._baseline_pending:
-            QMessageBox.information(self, "提示", "检索仍在进行，请等待完成后再查看对比")
-            return
-
-        if not self.current_results and not self.baseline_results:
-            QMessageBox.information(self, "提示", "请先执行搜索")
-            return
-
-        dialog = CompareDialog(
-            self._last_query or query,
-            self.baseline_results,
-            self.current_results,
-            baseline_label=self._last_baseline_label,
-            optimized_label=self._last_optimized_label,
-            parent=self,
-        )
-        dialog.exec()
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -645,10 +561,8 @@ class MainWindow(QMainWindow):
         self.results_state_label.setVisible(bool(message))
 
     def _update_search_controls(self) -> None:
-        running = self._optimized_pending or self._baseline_pending
-        self.search_btn.setEnabled(not running)
-        self.search_input.setEnabled(not running)
-        self.compare_btn.setEnabled(not running)
+        self.search_btn.setEnabled(not self._search_pending)
+        self.search_input.setEnabled(not self._search_pending)
 
     def _field_label(self, field: str) -> str:
         return {"": "全部字段", "name": "姓名", "papers": "论文"}.get(field, field)
@@ -657,40 +571,6 @@ class MainWindow(QMainWindow):
         if college_filter is None:
             return "全部学院"
         return "学院：" + "、".join(college_filter)
-
-    def _build_baseline_label(
-        self, ranking: str, college_filter: list[str] | None, research_filter: str
-    ) -> str:
-        parts = [
-            "精确匹配",
-            self._ranking_label(ranking),
-            self._college_label(college_filter),
-        ]
-        if research_filter:
-            parts.append(f"研究方向：{research_filter}")
-        parts.append("不应用字段范围")
-        return "基础系统（" + " + ".join(parts) + "）"
-
-    def _build_optimized_label(
-        self,
-        match_mode: str,
-        ranking: str,
-        college_filter: list[str] | None,
-        research_filter: str,
-        auto_relax: bool,
-        search_field: str,
-    ) -> str:
-        parts = [
-            "模糊匹配" if match_mode == "fuzzy" else "精确匹配",
-            self._ranking_label(ranking),
-            f"范围：{self._field_label(search_field)}",
-            self._college_label(college_filter),
-        ]
-        if research_filter:
-            parts.append(f"研究方向：{research_filter}")
-        if auto_relax:
-            parts.append("允许自动放宽")
-        return "优化系统（" + " + ".join(parts) + "）"
 
     def _ranking_label(self, ranking: str) -> str:
         return {"bm25": "BM25", "tfidf": "TF-IDF"}.get(ranking, ranking.upper())

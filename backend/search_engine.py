@@ -489,7 +489,6 @@ class SearchEngine:
         self,
         query: str,
         *,
-        match_mode: str = "exact",
         ranking: str = "bm25",
         college_filter: list[str] | None = None,
         research_filter: str = "",
@@ -501,11 +500,10 @@ class SearchEngine:
 
         Args:
             query: The search query string.
-            match_mode: "exact" or "fuzzy".
             ranking: "bm25" or "tfidf".
             college_filter: Optional list of college names to filter by.
             research_filter: Optional comma-separated research keywords.
-            auto_relax: If True, relax query when no results found.
+            auto_relax: If True, fuzzy expand + OR logic when no results found.
             search_field: If set, restrict search to this field (e.g. "name", "papers").
             top_k: Maximum number of results to return.
 
@@ -525,14 +523,13 @@ class SearchEngine:
                 query_tokens,
                 field=search_field,
                 ranking=ranking,
-                match_mode=match_mode,
                 college_filter=college_filter,
                 research_filter=research_filter,
                 auto_relax=auto_relax,
                 top_k=top_k,
             )
 
-        # Phase 1: exact search
+        # Phase 1: exact search (AND logic)
         results = self._ranked_search(
             query_tokens,
             ranking=ranking,
@@ -544,40 +541,17 @@ class SearchEngine:
         if results:
             return results[:top_k]
 
-        # No results — try fuzzy if requested
-        if match_mode == "fuzzy":
+        # Phase 2: no results — fuzzy expand + OR logic if auto_relax enabled
+        if auto_relax:
             fuzzy_tokens = self._fuzzy_expand(query_tokens)
-            results = self._ranked_search(
+            results = self._relaxed_search(
                 fuzzy_tokens,
                 ranking=ranking,
-                match_mode="fuzzy",
                 college_filter=college_filter,
                 research_filter=research_filter,
             )
             if results:
                 return results[:top_k]
-
-        # Still no results — try query relaxation (OR instead of AND)
-        if auto_relax:
-            results = self._relaxed_search(
-                query_tokens,
-                ranking=ranking,
-                college_filter=college_filter,
-                research_filter=research_filter,
-            )
-            if results:
-                return results[:top_k]
-
-            if match_mode == "fuzzy":
-                fuzzy_tokens = self._fuzzy_expand(query_tokens)
-                results = self._relaxed_search(
-                    fuzzy_tokens,
-                    ranking=ranking,
-                    college_filter=college_filter,
-                    research_filter=research_filter,
-                )
-                if results:
-                    return results[:top_k]
 
         return results[:top_k]
 
@@ -749,7 +723,6 @@ class SearchEngine:
         *,
         field: str,
         ranking: str,
-        match_mode: str,
         college_filter: list[str] | None,
         research_filter: str,
         auto_relax: bool,
@@ -764,21 +737,13 @@ class SearchEngine:
             if all(t in token_set for t in query_tokens):
                 candidates.add(idx)
 
-        # Fallback: fuzzy expand
-        if not candidates and match_mode == "fuzzy":
+        # Fallback: fuzzy expand + OR logic if auto_relax enabled
+        if not candidates and auto_relax:
             fuzzy_tokens = self._fuzzy_expand(query_tokens)
             for idx, record in enumerate(self.records):
                 ftokens = record.field_tokens.get(field, [])
                 token_set = set(ftokens)
                 if any(t in token_set for t in fuzzy_tokens):
-                    candidates.add(idx)
-
-        # Fallback: relax to OR
-        if not candidates and auto_relax:
-            for idx, record in enumerate(self.records):
-                ftokens = record.field_tokens.get(field, [])
-                token_set = set(ftokens)
-                if any(t in token_set for t in query_tokens):
                     candidates.add(idx)
 
         if college_filter:

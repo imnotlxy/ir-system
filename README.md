@@ -4,30 +4,41 @@
 
 检索系统已经拆到 `backend` 包中，Qt 客户端通过 HTTP/HTTPS 调用后端 API。
 
-启动后端：
+### 普通版
 
 ```bash
+# 启动后端
 uv run python -m backend.server --host 127.0.0.1 --port 8000
+
+# 启动前端
+uv run python main.py --api-url http://127.0.0.1:8000
 ```
 
-启动 Qt 前端：
+### 升级版（--advanced）
+
+升级版启用模糊查询等高级功能，前端会自动从后端读取状态并显示对应 UI。
 
 ```bash
-uv run python main.py --api-url http://127.0.0.1:8000
+# 启动后端
+uv run python -m backend.server --host 127.0.0.1 --port 8001 --advanced
+
+# 启动前端
+uv run python main.py --api-url http://127.0.0.1:8001
 ```
 
 如果要直接使用安装后的脚本，也可以运行：
 
 ```bash
 uv run ir-backend --host 127.0.0.1 --port 8000
+uv run ir-backend --host 127.0.0.1 --port 8001 --advanced
 uv run ir-client --api-url http://127.0.0.1:8000
 ```
 
-后端接口：
+## 后端接口
 
 - `GET /health`：健康检查。
-- `GET /metadata`：返回导师总数和学院列表。
-- `POST /search`：执行检索，请求体为 JSON，支持 `query`、`match_mode`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`、`baseline`。
+- `GET /metadata`：返回导师总数、学院列表及 `advanced` 状态。
+- `POST /search`：执行检索，请求体为 JSON，支持 `query`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`。其中 `auto_relax` 仅在后端以 `--advanced` 启动时生效。
 
   主搜索引擎会把分词结果、倒排索引、文档频率、文档长度和学院列表缓存到 `data/search_index/index.json`。启动后端或调用 `SearchEngine.load_data()` 时，如果缓存与 `data/teachers.jsonl` 的大小和修改时间匹配，会直接加载缓存；否则会自动重建并写回 `data/`。
 
