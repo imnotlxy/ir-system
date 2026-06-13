@@ -84,23 +84,19 @@ class SearchApiClient:
         self,
         query: str,
         *,
-        match_mode: str = "exact",
         ranking: str = "bm25",
         college_filter: list[str] | None = None,
         research_filter: str = "",
         auto_relax: bool = False,
         search_field: str = "",
-        baseline: bool = False,
     ) -> tuple[list[SearchResult], float, str]:
         payload = {
             "query": query,
-            "match_mode": match_mode,
             "ranking": ranking,
             "college_filter": college_filter or [],
             "research_filter": research_filter,
             "auto_relax": auto_relax,
             "search_field": search_field,
-            "baseline": baseline,
         }
         data = self._request("POST", "search", payload)
         results = [SearchResult.from_dict(item) for item in data.get("results", [])]

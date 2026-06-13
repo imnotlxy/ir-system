@@ -93,13 +93,6 @@ QPushButton#pageBtn {
     min-width: 32px;
 }
 
-/* ---- Compare button ---- */
-QPushButton#compareBtn {
-    border-radius: 6px;
-    padding: 8px 20px;
-    font-weight: bold;
-}
-
 /* ---- Theme toggle ---- */
 QPushButton#themeBtn {
     border-radius: 4px;
@@ -125,16 +118,5 @@ QLabel#sectionLabel {
     font-weight: bold;
     font-size: 14px;
     margin-top: 10px;
-}
-
-/* ---- Compare dialog summary ---- */
-QLabel#compareSummary {
-    font-size: 14px;
-    font-weight: bold;
-    padding: 8px;
-}
-QLabel#compareConfig {
-    font-size: 12px;
-    padding: 2px 4px 6px 4px;
 }
 """

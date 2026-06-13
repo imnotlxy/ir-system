@@ -46,9 +46,7 @@ def _result_to_dict(result: SearchResult) -> dict[str, Any]:
     }
 
 
-def _build_mode_info(results: list[SearchResult], baseline: bool) -> str:
-    if baseline:
-        return "基础系统（精确匹配）"
+def _build_mode_info(results: list[SearchResult]) -> str:
     if not results:
         return "无结果"
     mode = results[0].match_mode
@@ -62,7 +60,8 @@ def _build_mode_info(results: list[SearchResult], baseline: bool) -> str:
 class SearchApi:
     """Small application service around SearchEngine."""
 
-    def __init__(self, data_dir: str | Path | None = None):
+    def __init__(self, data_dir: str | Path | None = None, advanced: bool = False):
+        self.advanced = advanced
         self.engine = SearchEngine(data_dir)
         self.engine.load_data()
         self.experimental_index = ExperimentalQueryIndex(data_dir=data_dir)
@@ -72,6 +71,7 @@ class SearchApi:
         return {
             "record_count": len(self.engine.records),
             "college_names": self.engine.college_names,
+            "advanced": self.advanced,
         }
 
     def experimental_query(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -88,31 +88,22 @@ class SearchApi:
             raise ValueError("college_filter must be a list")
 
         t0 = time.perf_counter()
-        baseline = bool(payload.get("baseline", False))
-        if baseline:
-            results = self.engine.search_baseline(
-                query,
-                ranking=ranking,
-                college_filter=college_filter,
-                research_filter=str(payload.get("research_filter", "")),
-                top_k=int(payload.get("top_k", 50)),
-            )
-        else:
-            results = self.engine.search(
-                query,
-                match_mode=str(payload.get("match_mode", "exact")),
-                ranking=ranking,
-                college_filter=college_filter,
-                research_filter=str(payload.get("research_filter", "")),
-                auto_relax=bool(payload.get("auto_relax", False)),
-                search_field=str(payload.get("search_field", "")),
-                top_k=int(payload.get("top_k", 50)),
-            )
+        # Only allow auto_relax if backend is in advanced mode
+        auto_relax = bool(payload.get("auto_relax", False)) and self.advanced
+        results = self.engine.search(
+            query,
+            ranking=ranking,
+            college_filter=college_filter,
+            research_filter=str(payload.get("research_filter", "")),
+            auto_relax=auto_relax,
+            search_field=str(payload.get("search_field", "")),
+            top_k=int(payload.get("top_k", 50)),
+        )
         elapsed = time.perf_counter() - t0
         return {
             "results": [_result_to_dict(result) for result in results],
             "elapsed": elapsed,
-            "mode_info": _build_mode_info(results, baseline),
+            "mode_info": _build_mode_info(results),
         }
 
 
@@ -191,10 +182,11 @@ def run_server(
     host: str,
     port: int,
     data_dir: str | Path | None = None,
+    advanced: bool = False,
     certfile: str | None = None,
     keyfile: str | None = None,
 ) -> None:
-    api = SearchApi(data_dir)
+    api = SearchApi(data_dir, advanced=advanced)
     server = ThreadingHTTPServer((host, port), make_handler(api))
     scheme = "http"
 
@@ -215,10 +207,14 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-dir", default=None)
+    parser.add_argument(
+        "--advanced", action="store_true",
+        help="Enable advanced features (fuzzy match, auto-relax, etc.)",
+    )
     parser.add_argument("--certfile", default=None, help="TLS certificate for HTTPS")
     parser.add_argument("--keyfile", default=None, help="TLS private key for HTTPS")
     args = parser.parse_args()
-    run_server(args.host, args.port, args.data_dir, args.certfile, args.keyfile)
+    run_server(args.host, args.port, args.data_dir, args.advanced, args.certfile, args.keyfile)
 
 
 if __name__ == "__main__":
