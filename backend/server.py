@@ -102,9 +102,7 @@ class SearchApi:
 
         token_weights: dict[str, float] | None = None
         if llm_query_weight:
-            logger.info(
-                "Search request will use LLM query weighting: query=%r", query
-            )
+            logger.info("Search request will use LLM query weighting: query=%r", query)
             try:
                 query_tokens = self.engine._tokenize(query)
                 token_weights = compute_query_weights(query, query_tokens)
@@ -127,13 +125,12 @@ class SearchApi:
             search_field=str(payload.get("search_field", "")),
             top_k=int(payload.get("top_k", 50)),
             token_weights=token_weights,
+            pinyin_query=bool(payload.get("pinyin_query", False)),
         )
 
         mode_info = _build_mode_info(results)
         if token_weights:
-            weights_summary = " ".join(
-                f"{t}={w:.1f}" for t, w in token_weights.items()
-            )
+            weights_summary = " ".join(f"{t}={w:.1f}" for t, w in token_weights.items())
             mode_info = f"{mode_info}（LLM 查询加权：{weights_summary}）"
 
         if llm_rerank and results:

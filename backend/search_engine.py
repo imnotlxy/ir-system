@@ -11,8 +11,9 @@ from difflib import get_close_matches
 from pathlib import Path
 
 import jieba
+from pypinyin import Style, lazy_pinyin  # type: ignore[import-not-found]
 
-SEARCH_INDEX_SCHEMA_VERSION = 2
+SEARCH_INDEX_SCHEMA_VERSION = 3
 DEFAULT_SEARCH_INDEX_SUBDIR = "search_index"
 DEFAULT_SEARCH_INDEX_FILENAME = "index.json"
 
@@ -49,6 +50,8 @@ class TeacherRecord:
     detail_url: str = ""
     tokens: list[str] = field(default_factory=list)
     field_tokens: dict[str, list[str]] = field(default_factory=dict)
+    name_pinyin: str = ""
+    name_pinyin_initials: str = ""
 
 
 @dataclass
@@ -152,7 +155,7 @@ class SearchEngine:
             return None
         if payload.get("source") != "teachers.jsonl":
             return None
-        if payload.get("tokenizer") != "jieba-with-single-char-v1":
+        if payload.get("tokenizer") != "jieba-with-single-char-pinyin-v1":
             return None
         if payload.get("source_signature") != source_signature:
             return None
@@ -237,7 +240,7 @@ class SearchEngine:
             "schema_version": SEARCH_INDEX_SCHEMA_VERSION,
             "source": "teachers.jsonl",
             "source_signature": source_signature,
-            "tokenizer": "jieba-with-single-char-v1",
+            "tokenizer": "jieba-with-single-char-pinyin-v1",
             "record_count": len(self.records),
             "doc_lengths": self.doc_lengths,
             "avg_dl": self.avg_dl,
@@ -305,6 +308,8 @@ class SearchEngine:
             for section in sections
             for paragraph in section.get("paragraphs", [])
         )
+        name_pinyin, name_pinyin_initials = self._name_pinyin_forms(name)
+
         tokens: list[str] = []
         field_tokens: dict[str, list[str]] = {}
         if tokenize:
@@ -330,6 +335,9 @@ class SearchEngine:
 
             field_tokens = {
                 "name": self._tokenize_for_index(name),
+                "name_pinyin": [
+                    token for token in [name_pinyin, name_pinyin_initials] if token
+                ],
                 "papers": self._tokenize_for_index(works_text),
                 "works": self._tokenize_for_index(works_text),
                 "research": self._tokenize_for_index(research),
@@ -345,7 +353,7 @@ class SearchEngine:
                     )
                 ),
                 "text": self._tokenize_for_index(section_text or search_text),
-        }
+            }
 
         return TeacherRecord(
             raw=raw,
@@ -366,6 +374,8 @@ class SearchEngine:
             detail_url=detail_url,
             tokens=tokens,
             field_tokens=field_tokens,
+            name_pinyin=name_pinyin,
+            name_pinyin_initials=name_pinyin_initials,
         )
 
     @staticmethod
@@ -400,6 +410,26 @@ class SearchEngine:
         parts = re.split(r"(?=(?:^|\s)\d{1,2}[、.．])", text or "")
         works = [part.strip() for part in parts if part.strip()]
         return works[:limit] if works else []
+
+    @staticmethod
+    def _name_pinyin_forms(name: str) -> tuple[str, str]:
+        """Return compact full pinyin and initials for a Chinese teacher name."""
+        if not name:
+            return "", ""
+        syllables = lazy_pinyin(name, style=Style.NORMAL, errors="ignore")
+        initials = lazy_pinyin(name, style=Style.FIRST_LETTER, errors="ignore")
+        return "".join(syllables).lower(), "".join(initials).lower()
+
+    @staticmethod
+    def _normalize_pinyin_query(query: str) -> str:
+        """Normalize a user-entered pinyin query to lowercase letters only."""
+        return re.sub(r"[^a-z]", "", query.lower())
+
+    @staticmethod
+    def _looks_like_pinyin_query(query: str) -> bool:
+        """Return True for plain Latin-name queries such as zhouguodong or zgd."""
+        compact = re.sub(r"[\s'\-.]+", "", query.strip().lower())
+        return bool(compact) and bool(re.fullmatch(r"[a-z]+", compact))
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -507,6 +537,7 @@ class SearchEngine:
         search_field: str = "",
         top_k: int = 50,
         token_weights: dict[str, float] | None = None,
+        pinyin_query: bool = False,
     ) -> list[SearchResult]:
         """Execute a search query with the specified options.
 
@@ -519,12 +550,23 @@ class SearchEngine:
             search_field: If set, restrict search to this field (e.g. "name", "papers").
             top_k: Maximum number of results to return.
             token_weights: Optional LLM-assigned weights per query token.
+            pinyin_query: If True, match Latin pinyin against teacher names.
 
         Returns:
             List of SearchResult sorted by score descending.
         """
         if not self._loaded:
             self.load_data()
+
+        if pinyin_query or self._looks_like_pinyin_query(query):
+            pinyin_results = self._pinyin_name_search(
+                query,
+                college_filter=college_filter,
+                research_filter=research_filter,
+                top_k=top_k,
+            )
+            if pinyin_results:
+                return pinyin_results
 
         query_tokens = self._tokenize(query)
         if not query_tokens:
@@ -597,6 +639,68 @@ class SearchEngine:
         )
         return results[:top_k]
 
+    def _record_passes_filters(
+        self,
+        record: TeacherRecord,
+        *,
+        college_filter: list[str] | None,
+        research_filter: str,
+    ) -> bool:
+        """Return whether a record satisfies college and research filters."""
+        if college_filter and record.college not in set(college_filter):
+            return False
+        if research_filter:
+            research_keywords = [
+                kw.strip().lower() for kw in research_filter.split(",") if kw.strip()
+            ]
+            if research_keywords and not any(
+                kw in record.research.lower() for kw in research_keywords
+            ):
+                return False
+        return True
+
+    def _pinyin_name_search(
+        self,
+        query: str,
+        *,
+        college_filter: list[str] | None,
+        research_filter: str,
+        top_k: int,
+    ) -> list[SearchResult]:
+        """Search teacher names by compact full pinyin or initials."""
+        normalized_query = self._normalize_pinyin_query(query)
+        if not normalized_query:
+            return []
+
+        results: list[SearchResult] = []
+        for record in self.records:
+            if not self._record_passes_filters(
+                record,
+                college_filter=college_filter,
+                research_filter=research_filter,
+            ):
+                continue
+
+            full = record.name_pinyin
+            initials = record.name_pinyin_initials
+            if normalized_query == full:
+                score = 100.0
+            elif normalized_query == initials:
+                score = 90.0
+            elif normalized_query and normalized_query in full:
+                score = 50.0 - full.index(normalized_query)
+            elif normalized_query and normalized_query in initials:
+                score = 40.0 - initials.index(normalized_query)
+            else:
+                continue
+
+            results.append(
+                SearchResult(record=record, score=score, match_mode="pinyin")
+            )
+
+        results.sort(key=lambda r: (r.score, len(r.record.name)), reverse=True)
+        return results[:top_k]
+
     def _ranked_search(
         self,
         query_tokens: list[str],
@@ -650,9 +754,7 @@ class SearchEngine:
         results: list[SearchResult] = []
         for idx in candidates:
             if ranking == "bm25":
-                score = self._bm25_score(
-                    query_tokens, idx, token_weights=token_weights
-                )
+                score = self._bm25_score(query_tokens, idx, token_weights=token_weights)
             else:
                 score = self._tfidf_score(
                     query_tokens, idx, token_weights=token_weights
@@ -713,9 +815,7 @@ class SearchEngine:
         results: list[SearchResult] = []
         for idx in candidates:
             if ranking == "bm25":
-                score = self._bm25_score(
-                    query_tokens, idx, token_weights=token_weights
-                )
+                score = self._bm25_score(query_tokens, idx, token_weights=token_weights)
             else:
                 score = self._tfidf_score(
                     query_tokens, idx, token_weights=token_weights
@@ -798,9 +898,7 @@ class SearchEngine:
         results: list[SearchResult] = []
         for idx in candidates:
             if ranking == "bm25":
-                score = self._bm25_score(
-                    query_tokens, idx, token_weights=token_weights
-                )
+                score = self._bm25_score(query_tokens, idx, token_weights=token_weights)
             else:
                 score = self._tfidf_score(
                     query_tokens, idx, token_weights=token_weights

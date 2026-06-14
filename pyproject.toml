@@ -8,6 +8,7 @@ dependencies = [
     "pyqt6>=6.11.0",
     "jieba>=0.42.1",
     "pyqtdarktheme>=2.1.0",
+    "pypinyin>=0.55.0",
 ]
 
 [project.scripts]

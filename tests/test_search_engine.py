@@ -133,6 +133,21 @@ class SearchEngineTest(unittest.TestCase):
         self.assertIn("莫建华", names)
         self.assertIn("周建康", names)
 
+    def test_pinyin_query_finds_teacher_name_by_full_pinyin_and_initials(self) -> None:
+        full_pinyin_results = self.engine.search("zhouguodong", top_k=3)
+        explicit_full_pinyin_results = self.engine.search(
+            "zhouguodong", pinyin_query=True, top_k=3
+        )
+        initials_results = self.engine.search("zgd", top_k=3)
+
+        self.assertTrue(full_pinyin_results)
+        self.assertEqual(full_pinyin_results[0].record.name, "周国栋")
+        self.assertEqual(full_pinyin_results[0].match_mode, "pinyin")
+        self.assertTrue(explicit_full_pinyin_results)
+        self.assertEqual(explicit_full_pinyin_results[0].record.name, "周国栋")
+        self.assertTrue(initials_results)
+        self.assertEqual(initials_results[0].record.name, "周国栋")
+
 
 if __name__ == "__main__":
     _ = unittest.main()

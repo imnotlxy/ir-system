@@ -46,6 +46,7 @@ class SearchWorker(QThread):
         search_field: str = "",
         llm_rerank: bool = False,
         llm_query_weight: bool = False,
+        pinyin_query: bool = False,
     ):
         super().__init__()
         self.api_client = api_client
@@ -57,6 +58,7 @@ class SearchWorker(QThread):
         self.search_field = search_field
         self.llm_rerank = llm_rerank
         self.llm_query_weight = llm_query_weight
+        self.pinyin_query = pinyin_query
 
     def run(self) -> None:
         try:
@@ -69,6 +71,7 @@ class SearchWorker(QThread):
                 search_field=self.search_field,
                 llm_rerank=self.llm_rerank,
                 llm_query_weight=self.llm_query_weight,
+                pinyin_query=self.pinyin_query,
             )
             self.results_ready.emit(results, elapsed, mode_info)
         except Exception as e:
@@ -132,7 +135,7 @@ class MainWindow(QMainWindow):
         self.search_input = QLineEdit()
         self.search_input.setObjectName("searchInput")
         self.search_input.setPlaceholderText(
-            '输入查询词，如"自然语言处理"、"周国栋"、"知识图谱"…'
+            '输入查询词，如"自然语言处理"、"周国栋"、"zhouguodong"…'
         )
         self.search_input.returnPressed.connect(self._on_search)
         layout.addWidget(self.search_input, 1)
@@ -190,6 +193,11 @@ class MainWindow(QMainWindow):
         self.chk_auto_relax = QCheckBox("模糊查询")
         self.chk_auto_relax.setChecked(True)
         match_layout.addWidget(self.chk_auto_relax)
+        self.chk_pinyin_query = QCheckBox("拼音姓名查询")
+        self.chk_pinyin_query.setToolTip(
+            "输入教师姓名全拼或首字母进行匹配，例如 zhouguodong / zgd。"
+        )
+        match_layout.addWidget(self.chk_pinyin_query)
         self.chk_llm_rerank = QCheckBox("LLM 重排")
         self.chk_llm_rerank.setToolTip(
             "使用 DeepSeek 大模型对前 20 条结果进行相关性重排（仅高级模式可用）"
@@ -369,6 +377,7 @@ class MainWindow(QMainWindow):
         llm_query_weight = (
             self.chk_llm_query_weight.isChecked() if self.advanced else False
         )
+        pinyin_query = self.chk_pinyin_query.isChecked() if self.advanced else False
         if college_filter == []:
             self.current_results = []
             self.current_page = 0
@@ -397,6 +406,7 @@ class MainWindow(QMainWindow):
             search_field=self.search_field,
             llm_rerank=llm_rerank,
             llm_query_weight=llm_query_weight,
+            pinyin_query=pinyin_query,
         )
         self._search_worker.results_ready.connect(
             lambda results, elapsed, mode_info, rid=request_id: self._on_search_done(
