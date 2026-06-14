@@ -42,6 +42,8 @@ uv run ir-client --api-url http://127.0.0.1:8000
 
   主搜索引擎会把分词结果、倒排索引、文档频率、文档长度和学院列表缓存到 `data/search_index/index.json`。启动后端或调用 `SearchEngine.load_data()` 时，如果缓存与 `data/teachers.jsonl` 的大小和修改时间匹配，会直接加载缓存；否则会自动重建并写回 `data/`。
 
+  主搜索引擎支持查询期同义词扩展，词表位于 `data/synonyms.json`，格式为 `{ "标准词": ["同义词", "缩写"] }`。检索时同一查询词的原词与同义词按 OR 连接，不同查询词仍按 AND 连接；例如查询 `KG` 可以命中资料中的 `知识图谱`。修改同义词表后重启后端即可生效，无需重建搜索索引。
+
 - `POST /experimental-query`：实验性模拟查询接口，基于预构建倒排索引，兼容别名 `POST /query`。请求体示例：
 
   ```json

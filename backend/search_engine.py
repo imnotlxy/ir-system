@@ -83,6 +83,9 @@ class SearchEngine:
         self.doc_lengths: list[int] = []
         self.avg_dl: float = 0.0
         self.college_names: list[str] = []
+        self.synonyms: dict[str, set[str]] = {}
+        self.synonym_alternatives: dict[str, list[set[str]]] = {}
+        self._load_synonyms()
         self._loaded = False
 
     # ------------------------------------------------------------------
@@ -258,6 +261,52 @@ class SearchEngine:
         )
         tmp_path.replace(self.index_path)
 
+    def _load_synonyms(self) -> None:
+        """Load a bidirectional query-time synonym table from data/synonyms.json."""
+        path = self.data_dir / "synonyms.json"
+        if not path.exists():
+            return
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+
+        synonyms: dict[str, set[str]] = defaultdict(set)
+        alternatives: dict[str, list[set[str]]] = defaultdict(list)
+        for headword, raw_terms in payload.items():
+            terms = [str(headword)]
+            if isinstance(raw_terms, list):
+                terms.extend(str(term) for term in raw_terms)
+            elif isinstance(raw_terms, str):
+                terms.append(raw_terms)
+
+            term_alternatives: list[set[str]] = []
+            term_keys: set[str] = set()
+            for term in terms:
+                normalized = term.strip().lower()
+                tokens = set(self._tokenize(term))
+                if normalized:
+                    term_keys.add(normalized)
+                term_keys.update(tokens)
+
+                alternative = set(tokens)
+                if not alternative and normalized:
+                    alternative.add(normalized)
+                if alternative:
+                    term_alternatives.append(alternative)
+
+            for token in term_keys:
+                synonyms[token].update(term_keys - {token})
+                for alternative in term_alternatives:
+                    if alternative not in alternatives[token]:
+                        alternatives[token].append(alternative)
+
+        self.synonyms = {token: values for token, values in synonyms.items() if values}
+        self.synonym_alternatives = dict(alternatives)
+
     def _parse_record(self, raw: dict, *, tokenize: bool = True) -> TeacherRecord:
         """Parse a raw JSON record into a TeacherRecord."""
         if int(raw.get("schema_version") or 1) >= 2:
@@ -345,7 +394,7 @@ class SearchEngine:
                     )
                 ),
                 "text": self._tokenize_for_index(section_text or search_text),
-        }
+            }
 
         return TeacherRecord(
             raw=raw,
@@ -471,6 +520,40 @@ class SearchEngine:
 
         return score / (doc_len * query_len) if (doc_len * query_len) > 0 else 0.0
 
+    def _expanded_query_tokens(self, query_tokens: list[str]) -> list[str]:
+        """Return query tokens plus tokens from the synonym table, preserving order."""
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for token in query_tokens:
+            alternatives = [token, *sorted(self.synonyms.get(token, set()))]
+            for alternative in alternatives:
+                if alternative not in seen:
+                    expanded.append(alternative)
+                    seen.add(alternative)
+        return expanded
+
+    def _query_token_alternatives(
+        self, query_tokens: list[str]
+    ) -> list[list[set[str]]]:
+        """Return phrase-aware alternatives for each query token.
+
+        Alternatives are OR-connected, while tokens inside each alternative are
+        AND-connected. This prevents a synonym phrase such as "文本挖掘" from
+        matching documents that only contain the broad word "文本".
+        """
+        groups: list[list[set[str]]] = []
+        for token in query_tokens:
+            alternatives = [{token}]
+            for alternative in self.synonym_alternatives.get(token, []):
+                if alternative not in alternatives:
+                    alternatives.append(alternative)
+            groups.append(alternatives)
+        return groups
+
+    def _query_token_groups(self, query_tokens: list[str]) -> list[set[str]]:
+        """Return broad token groups, used only for field token-set checks."""
+        return [{token, *self.synonyms.get(token, set())} for token in query_tokens]
+
     @staticmethod
     def _name_match_boost(query_tokens: list[str], record: TeacherRecord) -> float:
         query_text = re.sub(r"\s+", "", "".join(query_tokens).lower())
@@ -591,14 +674,25 @@ class SearchEngine:
         research_filter: str,
     ) -> list[SearchResult]:
         """Score all candidate documents and return sorted results."""
-        # Find candidate docs: intersection of all query tokens in inverted index
+        # Find candidate docs: every query term must match, while synonyms within
+        # the same term are OR-connected.
         candidate_sets: list[set[int]] = []
-        for token in query_tokens:
-            if token in self.inverted_index:
-                candidate_sets.append(self.inverted_index[token])
-
-        if not candidate_sets:
-            return []
+        for alternatives in self._query_token_alternatives(query_tokens):
+            group_candidates: set[int] = set()
+            for alternative in alternatives:
+                alternative_candidates: set[int] | None = None
+                for token in alternative:
+                    postings = self.inverted_index.get(token, set())
+                    alternative_candidates = (
+                        set(postings)
+                        if alternative_candidates is None
+                        else alternative_candidates & postings
+                    )
+                if alternative_candidates:
+                    group_candidates |= alternative_candidates
+            if not group_candidates:
+                return []
+            candidate_sets.append(group_candidates)
 
         candidates = candidate_sets[0]
         for s in candidate_sets[1:]:
@@ -629,11 +723,12 @@ class SearchEngine:
         if not candidates:
             return []
 
-        # Score
+        # Score with expanded tokens so documents containing synonyms receive credit.
+        score_tokens = self._expanded_query_tokens(query_tokens)
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx) + self._name_match_boost(
+            score = score_fn(score_tokens, idx) + self._name_match_boost(
                 query_tokens, self.records[idx]
             )
             if score > 0:
@@ -658,10 +753,10 @@ class SearchEngine:
         research_filter: str,
     ) -> list[SearchResult]:
         """Relaxed search: union of any query token match (OR logic)."""
+        score_tokens = self._expanded_query_tokens(query_tokens)
         candidates: set[int] = set()
-        for token in query_tokens:
-            if token in self.inverted_index:
-                candidates |= self.inverted_index[token]
+        for token in score_tokens:
+            candidates |= self.inverted_index.get(token, set())
 
         if not candidates:
             return []
@@ -690,7 +785,7 @@ class SearchEngine:
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx) + self._name_match_boost(
+            score = score_fn(score_tokens, idx) + self._name_match_boost(
                 query_tokens, self.records[idx]
             )
             if score > 0:
@@ -729,17 +824,21 @@ class SearchEngine:
         top_k: int,
     ) -> list[SearchResult]:
         """Search restricted to a single field of each document."""
+        token_alternatives = self._query_token_alternatives(query_tokens)
         candidates: set[int] = set()
         for idx, record in enumerate(self.records):
             ftokens = record.field_tokens.get(field, [])
             token_set = set(ftokens)
-            # AND logic: all query tokens must appear in the field
-            if all(t in token_set for t in query_tokens):
+            # AND logic between query terms, OR logic between phrase-aware alternatives.
+            if all(
+                any(alternative <= token_set for alternative in alternatives)
+                for alternatives in token_alternatives
+            ):
                 candidates.add(idx)
 
         # Fallback: fuzzy expand + OR logic if auto_relax enabled
         if not candidates and auto_relax:
-            fuzzy_tokens = self._fuzzy_expand(query_tokens)
+            fuzzy_tokens = self._expanded_query_tokens(self._fuzzy_expand(query_tokens))
             for idx, record in enumerate(self.records):
                 ftokens = record.field_tokens.get(field, [])
                 token_set = set(ftokens)
@@ -767,11 +866,12 @@ class SearchEngine:
         if not candidates:
             return []
 
-        # Score using field-specific tokens
+        # Score using expanded tokens so field hits through synonyms rank normally.
+        score_tokens = self._expanded_query_tokens(query_tokens)
         score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx)
+            score = score_fn(score_tokens, idx)
             if score > 0:
                 results.append(
                     SearchResult(
