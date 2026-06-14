@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import ssl
 import time
 from http import HTTPStatus
@@ -12,7 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.experimental_query import ExperimentalQueryIndex
+from backend.llm_rerank import LlmRerankError, rerank
 from backend.search_engine import SearchEngine, SearchResult, TeacherRecord
+
+logger = logging.getLogger(__name__)
 
 
 def _record_to_dict(record: TeacherRecord) -> dict[str, Any]:
@@ -88,8 +92,9 @@ class SearchApi:
             raise ValueError("college_filter must be a list")
 
         t0 = time.perf_counter()
-        # Only allow auto_relax if backend is in advanced mode
+        # Only allow advanced options when the backend is in advanced mode
         auto_relax = bool(payload.get("auto_relax", False)) and self.advanced
+        llm_rerank = bool(payload.get("llm_rerank", False)) and self.advanced
         results = self.engine.search(
             query,
             ranking=ranking,
@@ -99,11 +104,27 @@ class SearchApi:
             search_field=str(payload.get("search_field", "")),
             top_k=int(payload.get("top_k", 50)),
         )
+
+        mode_info = _build_mode_info(results)
+        if llm_rerank and results:
+            logger.info(
+                "Search request will use LLM reranking: query=%r advanced=%s",
+                query,
+                self.advanced,
+            )
+            try:
+                results = rerank(query, results)
+                mode_info = f"{mode_info}（LLM 重排）"
+                logger.info("LLM reranking succeeded: query=%r", query)
+            except LlmRerankError as exc:
+                mode_info = f"{mode_info}（LLM 重排失败：{exc}）"
+                logger.error("LLM reranking failed: query=%r error=%s", query, exc)
+
         elapsed = time.perf_counter() - t0
         return {
             "results": [_result_to_dict(result) for result in results],
             "elapsed": elapsed,
-            "mode_info": _build_mode_info(results),
+            "mode_info": mode_info,
         }
 
 
@@ -186,6 +207,10 @@ def run_server(
     certfile: str | None = None,
     keyfile: str | None = None,
 ) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     api = SearchApi(data_dir, advanced=advanced)
     server = ThreadingHTTPServer((host, port), make_handler(api))
     scheme = "http"
@@ -196,8 +221,13 @@ def run_server(
         server.socket = context.wrap_socket(server.socket, server_side=True)
         scheme = "https"
 
-    print(
-        f"IR backend serving {len(api.engine.records)} records at {scheme}://{host}:{port}"
+    logger.info(
+        "IR backend serving %d records at %s://%s:%d (advanced=%s)",
+        len(api.engine.records),
+        scheme,
+        host,
+        port,
+        advanced,
     )
     server.serve_forever()
 
@@ -208,13 +238,16 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-dir", default=None)
     parser.add_argument(
-        "--advanced", action="store_true",
+        "--advanced",
+        action="store_true",
         help="Enable advanced features (fuzzy match, auto-relax, etc.)",
     )
     parser.add_argument("--certfile", default=None, help="TLS certificate for HTTPS")
     parser.add_argument("--keyfile", default=None, help="TLS private key for HTTPS")
     args = parser.parse_args()
-    run_server(args.host, args.port, args.data_dir, args.advanced, args.certfile, args.keyfile)
+    run_server(
+        args.host, args.port, args.data_dir, args.advanced, args.certfile, args.keyfile
+    )
 
 
 if __name__ == "__main__":
