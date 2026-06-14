@@ -45,6 +45,7 @@ class SearchWorker(QThread):
         auto_relax: bool,
         search_field: str = "",
         llm_rerank: bool = False,
+        llm_query_weight: bool = False,
     ):
         super().__init__()
         self.api_client = api_client
@@ -55,6 +56,7 @@ class SearchWorker(QThread):
         self.auto_relax = auto_relax
         self.search_field = search_field
         self.llm_rerank = llm_rerank
+        self.llm_query_weight = llm_query_weight
 
     def run(self) -> None:
         try:
@@ -66,6 +68,7 @@ class SearchWorker(QThread):
                 auto_relax=self.auto_relax,
                 search_field=self.search_field,
                 llm_rerank=self.llm_rerank,
+                llm_query_weight=self.llm_query_weight,
             )
             self.results_ready.emit(results, elapsed, mode_info)
         except Exception as e:
@@ -192,6 +195,12 @@ class MainWindow(QMainWindow):
             "使用 DeepSeek 大模型对前 20 条结果进行相关性重排（仅高级模式可用）"
         )
         match_layout.addWidget(self.chk_llm_rerank)
+        self.chk_llm_query_weight = QCheckBox("LLM 查询加权")
+        self.chk_llm_query_weight.setToolTip(
+            "使用 DeepSeek 大模型为查询词的各部分分配不同权重，"
+            "核心关键词权重更高，辅助词权重更低（仅高级模式可用）"
+        )
+        match_layout.addWidget(self.chk_llm_query_weight)
         layout.addWidget(self.match_widget)
 
         rank_layout = QVBoxLayout()
@@ -357,6 +366,9 @@ class MainWindow(QMainWindow):
         research_filter = self.research_input.text().strip()
         auto_relax = self.chk_auto_relax.isChecked() if self.advanced else False
         llm_rerank = self.chk_llm_rerank.isChecked() if self.advanced else False
+        llm_query_weight = (
+            self.chk_llm_query_weight.isChecked() if self.advanced else False
+        )
         if college_filter == []:
             self.current_results = []
             self.current_page = 0
@@ -384,6 +396,7 @@ class MainWindow(QMainWindow):
             auto_relax,
             search_field=self.search_field,
             llm_rerank=llm_rerank,
+            llm_query_weight=llm_query_weight,
         )
         self._search_worker.results_ready.connect(
             lambda results, elapsed, mode_info, rid=request_id: self._on_search_done(

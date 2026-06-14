@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.experimental_query import ExperimentalQueryIndex
+from backend.llm_query_weight import LlmQueryWeightError, compute_query_weights
 from backend.llm_rerank import LlmRerankError, rerank
 from backend.search_engine import SearchEngine, SearchResult, TeacherRecord
 
@@ -95,6 +96,28 @@ class SearchApi:
         # Only allow advanced options when the backend is in advanced mode
         auto_relax = bool(payload.get("auto_relax", False)) and self.advanced
         llm_rerank = bool(payload.get("llm_rerank", False)) and self.advanced
+        llm_query_weight = (
+            bool(payload.get("llm_query_weight", False)) and self.advanced
+        )
+
+        token_weights: dict[str, float] | None = None
+        if llm_query_weight:
+            logger.info(
+                "Search request will use LLM query weighting: query=%r", query
+            )
+            try:
+                query_tokens = self.engine._tokenize(query)
+                token_weights = compute_query_weights(query, query_tokens)
+                logger.info(
+                    "LLM query weighting succeeded: query=%r weights=%s",
+                    query,
+                    token_weights,
+                )
+            except LlmQueryWeightError as exc:
+                logger.error(
+                    "LLM query weighting failed: query=%r error=%s", query, exc
+                )
+
         results = self.engine.search(
             query,
             ranking=ranking,
@@ -103,9 +126,16 @@ class SearchApi:
             auto_relax=auto_relax,
             search_field=str(payload.get("search_field", "")),
             top_k=int(payload.get("top_k", 50)),
+            token_weights=token_weights,
         )
 
         mode_info = _build_mode_info(results)
+        if token_weights:
+            weights_summary = " ".join(
+                f"{t}={w:.1f}" for t, w in token_weights.items()
+            )
+            mode_info = f"{mode_info}（LLM 查询加权：{weights_summary}）"
+
         if llm_rerank and results:
             logger.info(
                 "Search request will use LLM reranking: query=%r advanced=%s",

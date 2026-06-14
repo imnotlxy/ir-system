@@ -433,6 +433,7 @@ class SearchEngine:
         doc_idx: int,
         k1: float = 1.5,
         b: float = 0.75,
+        token_weights: dict[str, float] | None = None,
     ) -> float:
         """Compute BM25 score for a single document."""
         score = 0.0
@@ -443,14 +444,21 @@ class SearchEngine:
             if df == 0:
                 continue
             idf = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
-            # Count term frequency in doc
             tf = self.records[doc_idx].tokens.count(term)
             numerator = tf * (k1 + 1)
             denominator = tf + k1 * (1 - b + b * dl / self.avg_dl)
-            score += idf * numerator / denominator
+            term_score = idf * numerator / denominator
+            if token_weights:
+                term_score *= token_weights.get(term, 1.0)
+            score += term_score
         return score
 
-    def _tfidf_score(self, query_tokens: list[str], doc_idx: int) -> float:
+    def _tfidf_score(
+        self,
+        query_tokens: list[str],
+        doc_idx: int,
+        token_weights: dict[str, float] | None = None,
+    ) -> float:
         """Compute TF-IDF cosine similarity score."""
         n = len(self.records)
         doc_tokens = self.records[doc_idx].tokens
@@ -467,7 +475,10 @@ class SearchEngine:
                 continue
             idf = math.log(n / (df + 1)) + 1.0
             dtf = doc_counter.get(term, 0)
-            score += qtf * dtf * idf * idf
+            term_score = qtf * dtf * idf * idf
+            if token_weights:
+                term_score *= token_weights.get(term, 1.0)
+            score += term_score
 
         return score / (doc_len * query_len) if (doc_len * query_len) > 0 else 0.0
 
@@ -495,6 +506,7 @@ class SearchEngine:
         auto_relax: bool = False,
         search_field: str = "",
         top_k: int = 50,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Execute a search query with the specified options.
 
@@ -506,6 +518,7 @@ class SearchEngine:
             auto_relax: If True, fuzzy expand + OR logic when no results found.
             search_field: If set, restrict search to this field (e.g. "name", "papers").
             top_k: Maximum number of results to return.
+            token_weights: Optional LLM-assigned weights per query token.
 
         Returns:
             List of SearchResult sorted by score descending.
@@ -527,6 +540,7 @@ class SearchEngine:
                 research_filter=research_filter,
                 auto_relax=auto_relax,
                 top_k=top_k,
+                token_weights=token_weights,
             )
 
         # Phase 1: exact search (AND logic)
@@ -536,6 +550,7 @@ class SearchEngine:
             match_mode="exact",
             college_filter=college_filter,
             research_filter=research_filter,
+            token_weights=token_weights,
         )
 
         if results:
@@ -549,6 +564,7 @@ class SearchEngine:
                 ranking=ranking,
                 college_filter=college_filter,
                 research_filter=research_filter,
+                token_weights=token_weights,
             )
             if results:
                 return results[:top_k]
@@ -589,6 +605,7 @@ class SearchEngine:
         match_mode: str,
         college_filter: list[str] | None,
         research_filter: str,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Score all candidate documents and return sorted results."""
         # Find candidate docs: intersection of all query tokens in inverted index
@@ -630,12 +647,17 @@ class SearchEngine:
             return []
 
         # Score
-        score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx) + self._name_match_boost(
-                query_tokens, self.records[idx]
-            )
+            if ranking == "bm25":
+                score = self._bm25_score(
+                    query_tokens, idx, token_weights=token_weights
+                )
+            else:
+                score = self._tfidf_score(
+                    query_tokens, idx, token_weights=token_weights
+                )
+            score += self._name_match_boost(query_tokens, self.records[idx])
             if score > 0:
                 results.append(
                     SearchResult(
@@ -656,6 +678,7 @@ class SearchEngine:
         ranking: str,
         college_filter: list[str] | None,
         research_filter: str,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Relaxed search: union of any query token match (OR logic)."""
         candidates: set[int] = set()
@@ -687,12 +710,17 @@ class SearchEngine:
         if not candidates:
             return []
 
-        score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx) + self._name_match_boost(
-                query_tokens, self.records[idx]
-            )
+            if ranking == "bm25":
+                score = self._bm25_score(
+                    query_tokens, idx, token_weights=token_weights
+                )
+            else:
+                score = self._tfidf_score(
+                    query_tokens, idx, token_weights=token_weights
+                )
+            score += self._name_match_boost(query_tokens, self.records[idx])
             if score > 0:
                 results.append(
                     SearchResult(
@@ -727,13 +755,13 @@ class SearchEngine:
         research_filter: str,
         auto_relax: bool,
         top_k: int,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Search restricted to a single field of each document."""
         candidates: set[int] = set()
         for idx, record in enumerate(self.records):
             ftokens = record.field_tokens.get(field, [])
             token_set = set(ftokens)
-            # AND logic: all query tokens must appear in the field
             if all(t in token_set for t in query_tokens):
                 candidates.add(idx)
 
@@ -767,11 +795,16 @@ class SearchEngine:
         if not candidates:
             return []
 
-        # Score using field-specific tokens
-        score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(query_tokens, idx)
+            if ranking == "bm25":
+                score = self._bm25_score(
+                    query_tokens, idx, token_weights=token_weights
+                )
+            else:
+                score = self._tfidf_score(
+                    query_tokens, idx, token_weights=token_weights
+                )
             if score > 0:
                 results.append(
                     SearchResult(
