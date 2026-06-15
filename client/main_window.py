@@ -44,6 +44,9 @@ class SearchWorker(QThread):
         research_filter: str,
         auto_relax: bool,
         search_field: str = "",
+        llm_rerank: bool = False,
+        llm_query_weight: bool = False,
+        pinyin_query: bool = False,
     ):
         super().__init__()
         self.api_client = api_client
@@ -53,6 +56,9 @@ class SearchWorker(QThread):
         self.research_filter = research_filter
         self.auto_relax = auto_relax
         self.search_field = search_field
+        self.llm_rerank = llm_rerank
+        self.llm_query_weight = llm_query_weight
+        self.pinyin_query = pinyin_query
 
     def run(self) -> None:
         try:
@@ -63,6 +69,9 @@ class SearchWorker(QThread):
                 research_filter=self.research_filter,
                 auto_relax=self.auto_relax,
                 search_field=self.search_field,
+                llm_rerank=self.llm_rerank,
+                llm_query_weight=self.llm_query_weight,
+                pinyin_query=self.pinyin_query,
             )
             self.results_ready.emit(results, elapsed, mode_info)
         except Exception as e:
@@ -81,7 +90,9 @@ class MainWindow(QMainWindow):
         self.current_results: list[SearchResult] = []
         self.current_page = 0
         self._current_theme = "auto"  # "auto", "dark", "light"
-        self.search_field = ""  # "" means all fields, "name" / "papers" for field-specific
+        self.search_field = (
+            ""  # "" means all fields, "name" / "papers" for field-specific
+        )
         self._search_worker: SearchWorker | None = None
         self._search_request_id = 0
         self._search_pending = False
@@ -123,7 +134,9 @@ class MainWindow(QMainWindow):
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("searchInput")
-        self.search_input.setPlaceholderText('输入查询词，如"自然语言处理"、"周国栋"、"知识图谱"…')
+        self.search_input.setPlaceholderText(
+            '输入查询词，如"自然语言处理"、"周国栋"、"zhouguodong"…'
+        )
         self.search_input.returnPressed.connect(self._on_search)
         layout.addWidget(self.search_input, 1)
 
@@ -180,6 +193,22 @@ class MainWindow(QMainWindow):
         self.chk_auto_relax = QCheckBox("模糊查询")
         self.chk_auto_relax.setChecked(True)
         match_layout.addWidget(self.chk_auto_relax)
+        self.chk_pinyin_query = QCheckBox("拼音姓名查询")
+        self.chk_pinyin_query.setToolTip(
+            "输入教师姓名全拼或首字母进行匹配，例如 zhouguodong / zgd。"
+        )
+        match_layout.addWidget(self.chk_pinyin_query)
+        self.chk_llm_rerank = QCheckBox("LLM 重排")
+        self.chk_llm_rerank.setToolTip(
+            "使用 DeepSeek 大模型对前 20 条结果进行相关性重排（仅高级模式可用）"
+        )
+        match_layout.addWidget(self.chk_llm_rerank)
+        self.chk_llm_query_weight = QCheckBox("LLM 查询加权")
+        self.chk_llm_query_weight.setToolTip(
+            "使用 DeepSeek 大模型为查询词的各部分分配不同权重，"
+            "核心关键词权重更高，辅助词权重更低（仅高级模式可用）"
+        )
+        match_layout.addWidget(self.chk_llm_query_weight)
         layout.addWidget(self.match_widget)
 
         rank_layout = QVBoxLayout()
@@ -209,7 +238,9 @@ class MainWindow(QMainWindow):
         research_layout.addWidget(self._panel_label("研究领域过滤"))
         self.research_input = QLineEdit()
         self.research_input.setPlaceholderText("关键词，逗号分隔")
-        self.research_input.setToolTip("仅过滤导师资料中的研究方向字段，多个关键词用英文逗号分隔。")
+        self.research_input.setToolTip(
+            "仅过滤导师资料中的研究方向字段，多个关键词用英文逗号分隔。"
+        )
         research_layout.addWidget(self.research_input)
         layout.addLayout(research_layout)
 
@@ -232,13 +263,23 @@ class MainWindow(QMainWindow):
         self.results_table = QTableWidget()
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.results_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
         self.results_table.doubleClicked.connect(self._on_table_double_click)
         vertical_header = self.results_table.verticalHeader()
         assert vertical_header is not None
         vertical_header.setVisible(False)
 
-        columns = ["姓名", "职称", "学院", "研究方向", "论文代表作（节选）", "联系方式", "操作"]
+        columns = [
+            "姓名",
+            "职称",
+            "学院",
+            "研究方向",
+            "论文代表作（节选）",
+            "联系方式",
+            "操作",
+        ]
         self.results_table.setColumnCount(len(columns))
         self.results_table.setHorizontalHeaderLabels(columns)
 
@@ -332,6 +373,11 @@ class MainWindow(QMainWindow):
         college_filter = self._get_college_filter()
         research_filter = self.research_input.text().strip()
         auto_relax = self.chk_auto_relax.isChecked() if self.advanced else False
+        llm_rerank = self.chk_llm_rerank.isChecked() if self.advanced else False
+        llm_query_weight = (
+            self.chk_llm_query_weight.isChecked() if self.advanced else False
+        )
+        pinyin_query = self.chk_pinyin_query.isChecked() if self.advanced else False
         if college_filter == []:
             self.current_results = []
             self.current_page = 0
@@ -351,9 +397,16 @@ class MainWindow(QMainWindow):
         self._show_results_state("正在检索…")
 
         self._search_worker = SearchWorker(
-            self.api_client, query, ranking,
-            college_filter, research_filter, auto_relax,
+            self.api_client,
+            query,
+            ranking,
+            college_filter,
+            research_filter,
+            auto_relax,
             search_field=self.search_field,
+            llm_rerank=llm_rerank,
+            llm_query_weight=llm_query_weight,
+            pinyin_query=pinyin_query,
         )
         self._search_worker.results_ready.connect(
             lambda results, elapsed, mode_info, rid=request_id: self._on_search_done(
@@ -366,7 +419,11 @@ class MainWindow(QMainWindow):
         self._search_worker.start()
 
     def _on_search_done(
-        self, request_id: int, results: list[SearchResult], elapsed: float, mode_info: str
+        self,
+        request_id: int,
+        results: list[SearchResult],
+        elapsed: float,
+        mode_info: str,
     ) -> None:
         if request_id != self._search_request_id:
             return
@@ -450,7 +507,9 @@ class MainWindow(QMainWindow):
 
         # Update pagination
         self._render_pagination(total_pages)
-        self.page_info_label.setText(f"第 {self.current_page + 1}/{total_pages} 页，共 {total} 条")
+        self.page_info_label.setText(
+            f"第 {self.current_page + 1}/{total_pages} 页，共 {total} 条"
+        )
 
     def _render_pagination(self, total_pages: int) -> None:
         # Clear old buttons
@@ -592,6 +651,7 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self) -> None:
         import qdarktheme
+
         qdarktheme.setup_theme(
             theme=self._current_theme,
             additional_qss=ADDITIONAL_QSS,

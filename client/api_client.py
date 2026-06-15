@@ -89,6 +89,9 @@ class SearchApiClient:
         research_filter: str = "",
         auto_relax: bool = False,
         search_field: str = "",
+        llm_rerank: bool = False,
+        llm_query_weight: bool = False,
+        pinyin_query: bool = False,
     ) -> tuple[list[SearchResult], float, str]:
         payload = {
             "query": query,
@@ -97,12 +100,17 @@ class SearchApiClient:
             "research_filter": research_filter,
             "auto_relax": auto_relax,
             "search_field": search_field,
+            "llm_rerank": llm_rerank,
+            "llm_query_weight": llm_query_weight,
+            "pinyin_query": pinyin_query,
         }
         data = self._request("POST", "search", payload)
         results = [SearchResult.from_dict(item) for item in data.get("results", [])]
         return results, float(data.get("elapsed") or 0.0), data.get("mode_info") or ""
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         url = urljoin(self.base_url, path)
         body = None
         headers = {"Accept": "application/json"}
@@ -118,7 +126,9 @@ class SearchApiClient:
             detail = self._decode_response(exc.read()).get("error", exc.reason)
             raise RuntimeError(f"后端返回错误 {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise RuntimeError(f"无法连接检索后端 {self.base_url}: {exc.reason}") from exc
+            raise RuntimeError(
+                f"无法连接检索后端 {self.base_url}: {exc.reason}"
+            ) from exc
 
     @staticmethod
     def _decode_response(body: bytes) -> dict[str, Any]:

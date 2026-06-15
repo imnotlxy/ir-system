@@ -11,8 +11,9 @@ from difflib import get_close_matches
 from pathlib import Path
 
 import jieba
+from pypinyin import Style, lazy_pinyin  # type: ignore[import-not-found]
 
-SEARCH_INDEX_SCHEMA_VERSION = 2
+SEARCH_INDEX_SCHEMA_VERSION = 3
 DEFAULT_SEARCH_INDEX_SUBDIR = "search_index"
 DEFAULT_SEARCH_INDEX_FILENAME = "index.json"
 
@@ -49,6 +50,8 @@ class TeacherRecord:
     detail_url: str = ""
     tokens: list[str] = field(default_factory=list)
     field_tokens: dict[str, list[str]] = field(default_factory=dict)
+    name_pinyin: str = ""
+    name_pinyin_initials: str = ""
 
 
 @dataclass
@@ -155,7 +158,7 @@ class SearchEngine:
             return None
         if payload.get("source") != "teachers.jsonl":
             return None
-        if payload.get("tokenizer") != "jieba-with-single-char-v1":
+        if payload.get("tokenizer") != "jieba-with-single-char-pinyin-v1":
             return None
         if payload.get("source_signature") != source_signature:
             return None
@@ -240,7 +243,7 @@ class SearchEngine:
             "schema_version": SEARCH_INDEX_SCHEMA_VERSION,
             "source": "teachers.jsonl",
             "source_signature": source_signature,
-            "tokenizer": "jieba-with-single-char-v1",
+            "tokenizer": "jieba-with-single-char-pinyin-v1",
             "record_count": len(self.records),
             "doc_lengths": self.doc_lengths,
             "avg_dl": self.avg_dl,
@@ -354,6 +357,8 @@ class SearchEngine:
             for section in sections
             for paragraph in section.get("paragraphs", [])
         )
+        name_pinyin, name_pinyin_initials = self._name_pinyin_forms(name)
+
         tokens: list[str] = []
         field_tokens: dict[str, list[str]] = {}
         if tokenize:
@@ -379,6 +384,9 @@ class SearchEngine:
 
             field_tokens = {
                 "name": self._tokenize_for_index(name),
+                "name_pinyin": [
+                    token for token in [name_pinyin, name_pinyin_initials] if token
+                ],
                 "papers": self._tokenize_for_index(works_text),
                 "works": self._tokenize_for_index(works_text),
                 "research": self._tokenize_for_index(research),
@@ -415,6 +423,8 @@ class SearchEngine:
             detail_url=detail_url,
             tokens=tokens,
             field_tokens=field_tokens,
+            name_pinyin=name_pinyin,
+            name_pinyin_initials=name_pinyin_initials,
         )
 
     @staticmethod
@@ -451,6 +461,26 @@ class SearchEngine:
         return works[:limit] if works else []
 
     @staticmethod
+    def _name_pinyin_forms(name: str) -> tuple[str, str]:
+        """Return compact full pinyin and initials for a Chinese teacher name."""
+        if not name:
+            return "", ""
+        syllables = lazy_pinyin(name, style=Style.NORMAL, errors="ignore")
+        initials = lazy_pinyin(name, style=Style.FIRST_LETTER, errors="ignore")
+        return "".join(syllables).lower(), "".join(initials).lower()
+
+    @staticmethod
+    def _normalize_pinyin_query(query: str) -> str:
+        """Normalize a user-entered pinyin query to lowercase letters only."""
+        return re.sub(r"[^a-z]", "", query.lower())
+
+    @staticmethod
+    def _looks_like_pinyin_query(query: str) -> bool:
+        """Return True for plain Latin-name queries such as zhouguodong or zgd."""
+        compact = re.sub(r"[\s'\-.]+", "", query.strip().lower())
+        return bool(compact) and bool(re.fullmatch(r"[a-z]+", compact))
+
+    @staticmethod
     def _tokenize(text: str) -> list[str]:
         """Tokenize Chinese + English text using jieba."""
         text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text, flags=re.UNICODE)
@@ -482,6 +512,7 @@ class SearchEngine:
         doc_idx: int,
         k1: float = 1.5,
         b: float = 0.75,
+        token_weights: dict[str, float] | None = None,
     ) -> float:
         """Compute BM25 score for a single document."""
         score = 0.0
@@ -492,14 +523,21 @@ class SearchEngine:
             if df == 0:
                 continue
             idf = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
-            # Count term frequency in doc
             tf = self.records[doc_idx].tokens.count(term)
             numerator = tf * (k1 + 1)
             denominator = tf + k1 * (1 - b + b * dl / self.avg_dl)
-            score += idf * numerator / denominator
+            term_score = idf * numerator / denominator
+            if token_weights:
+                term_score *= token_weights.get(term, 1.0)
+            score += term_score
         return score
 
-    def _tfidf_score(self, query_tokens: list[str], doc_idx: int) -> float:
+    def _tfidf_score(
+        self,
+        query_tokens: list[str],
+        doc_idx: int,
+        token_weights: dict[str, float] | None = None,
+    ) -> float:
         """Compute TF-IDF cosine similarity score."""
         n = len(self.records)
         doc_tokens = self.records[doc_idx].tokens
@@ -516,7 +554,10 @@ class SearchEngine:
                 continue
             idf = math.log(n / (df + 1)) + 1.0
             dtf = doc_counter.get(term, 0)
-            score += qtf * dtf * idf * idf
+            term_score = qtf * dtf * idf * idf
+            if token_weights:
+                term_score *= token_weights.get(term, 1.0)
+            score += term_score
 
         return score / (doc_len * query_len) if (doc_len * query_len) > 0 else 0.0
 
@@ -578,6 +619,8 @@ class SearchEngine:
         auto_relax: bool = False,
         search_field: str = "",
         top_k: int = 50,
+        token_weights: dict[str, float] | None = None,
+        pinyin_query: bool = False,
     ) -> list[SearchResult]:
         """Execute a search query with the specified options.
 
@@ -589,12 +632,24 @@ class SearchEngine:
             auto_relax: If True, fuzzy expand + OR logic when no results found.
             search_field: If set, restrict search to this field (e.g. "name", "papers").
             top_k: Maximum number of results to return.
+            token_weights: Optional LLM-assigned weights per query token.
+            pinyin_query: If True, match Latin pinyin against teacher names.
 
         Returns:
             List of SearchResult sorted by score descending.
         """
         if not self._loaded:
             self.load_data()
+
+        if pinyin_query or self._looks_like_pinyin_query(query):
+            pinyin_results = self._pinyin_name_search(
+                query,
+                college_filter=college_filter,
+                research_filter=research_filter,
+                top_k=top_k,
+            )
+            if pinyin_results:
+                return pinyin_results
 
         query_tokens = self._tokenize(query)
         if not query_tokens:
@@ -610,6 +665,7 @@ class SearchEngine:
                 research_filter=research_filter,
                 auto_relax=auto_relax,
                 top_k=top_k,
+                token_weights=token_weights,
             )
 
         # Phase 1: exact search (AND logic)
@@ -619,6 +675,7 @@ class SearchEngine:
             match_mode="exact",
             college_filter=college_filter,
             research_filter=research_filter,
+            token_weights=token_weights,
         )
 
         if results:
@@ -632,6 +689,7 @@ class SearchEngine:
                 ranking=ranking,
                 college_filter=college_filter,
                 research_filter=research_filter,
+                token_weights=token_weights,
             )
             if results:
                 return results[:top_k]
@@ -664,6 +722,68 @@ class SearchEngine:
         )
         return results[:top_k]
 
+    def _record_passes_filters(
+        self,
+        record: TeacherRecord,
+        *,
+        college_filter: list[str] | None,
+        research_filter: str,
+    ) -> bool:
+        """Return whether a record satisfies college and research filters."""
+        if college_filter and record.college not in set(college_filter):
+            return False
+        if research_filter:
+            research_keywords = [
+                kw.strip().lower() for kw in research_filter.split(",") if kw.strip()
+            ]
+            if research_keywords and not any(
+                kw in record.research.lower() for kw in research_keywords
+            ):
+                return False
+        return True
+
+    def _pinyin_name_search(
+        self,
+        query: str,
+        *,
+        college_filter: list[str] | None,
+        research_filter: str,
+        top_k: int,
+    ) -> list[SearchResult]:
+        """Search teacher names by compact full pinyin or initials."""
+        normalized_query = self._normalize_pinyin_query(query)
+        if not normalized_query:
+            return []
+
+        results: list[SearchResult] = []
+        for record in self.records:
+            if not self._record_passes_filters(
+                record,
+                college_filter=college_filter,
+                research_filter=research_filter,
+            ):
+                continue
+
+            full = record.name_pinyin
+            initials = record.name_pinyin_initials
+            if normalized_query == full:
+                score = 100.0
+            elif normalized_query == initials:
+                score = 90.0
+            elif normalized_query and normalized_query in full:
+                score = 50.0 - full.index(normalized_query)
+            elif normalized_query and normalized_query in initials:
+                score = 40.0 - initials.index(normalized_query)
+            else:
+                continue
+
+            results.append(
+                SearchResult(record=record, score=score, match_mode="pinyin")
+            )
+
+        results.sort(key=lambda r: (r.score, len(r.record.name)), reverse=True)
+        return results[:top_k]
+
     def _ranked_search(
         self,
         query_tokens: list[str],
@@ -672,6 +792,7 @@ class SearchEngine:
         match_mode: str,
         college_filter: list[str] | None,
         research_filter: str,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Score all candidate documents and return sorted results."""
         # Find candidate docs: every query term must match, while synonyms within
@@ -725,12 +846,21 @@ class SearchEngine:
 
         # Score with expanded tokens so documents containing synonyms receive credit.
         score_tokens = self._expanded_query_tokens(query_tokens)
-        score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(score_tokens, idx) + self._name_match_boost(
-                query_tokens, self.records[idx]
-            )
+            if ranking == "bm25":
+                score = self._bm25_score(
+                    score_tokens,
+                    idx,
+                    token_weights=token_weights,
+                )
+            else:
+                score = self._tfidf_score(
+                    score_tokens,
+                    idx,
+                    token_weights=token_weights,
+                )
+            score += self._name_match_boost(query_tokens, self.records[idx])
             if score > 0:
                 results.append(
                     SearchResult(
@@ -751,6 +881,7 @@ class SearchEngine:
         ranking: str,
         college_filter: list[str] | None,
         research_filter: str,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Relaxed search: union of any query token match (OR logic)."""
         score_tokens = self._expanded_query_tokens(query_tokens)
@@ -782,12 +913,21 @@ class SearchEngine:
         if not candidates:
             return []
 
-        score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(score_tokens, idx) + self._name_match_boost(
-                query_tokens, self.records[idx]
-            )
+            if ranking == "bm25":
+                score = self._bm25_score(
+                    score_tokens,
+                    idx,
+                    token_weights=token_weights,
+                )
+            else:
+                score = self._tfidf_score(
+                    score_tokens,
+                    idx,
+                    token_weights=token_weights,
+                )
+            score += self._name_match_boost(query_tokens, self.records[idx])
             if score > 0:
                 results.append(
                     SearchResult(
@@ -822,6 +962,7 @@ class SearchEngine:
         research_filter: str,
         auto_relax: bool,
         top_k: int,
+        token_weights: dict[str, float] | None = None,
     ) -> list[SearchResult]:
         """Search restricted to a single field of each document."""
         token_alternatives = self._query_token_alternatives(query_tokens)
@@ -868,10 +1009,20 @@ class SearchEngine:
 
         # Score using expanded tokens so field hits through synonyms rank normally.
         score_tokens = self._expanded_query_tokens(query_tokens)
-        score_fn = self._bm25_score if ranking == "bm25" else self._tfidf_score
         results: list[SearchResult] = []
         for idx in candidates:
-            score = score_fn(score_tokens, idx)
+            if ranking == "bm25":
+                score = self._bm25_score(
+                    score_tokens,
+                    idx,
+                    token_weights=token_weights,
+                )
+            else:
+                score = self._tfidf_score(
+                    score_tokens,
+                    idx,
+                    token_weights=token_weights,
+                )
             if score > 0:
                 results.append(
                     SearchResult(

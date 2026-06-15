@@ -11,6 +11,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from pypinyin import Style, lazy_pinyin  # type: ignore[import-not-found]
+
 INDEX_SCHEMA_VERSION = 1
 DEFAULT_INDEX_SUBDIR = "experimental_query_index"
 DEFAULT_INDEX_FILENAME = "index.json"
@@ -101,6 +103,30 @@ def extract_name(record: dict[str, Any]) -> str:
         or record.get("title")
         or ""
     )
+
+
+def _normalize_pinyin(text: str) -> str:
+    return re.sub(r"[^a-z]", "", text.lower())
+
+
+def _pinyin_name_forms(name: str) -> tuple[str, str]:
+    if not name:
+        return "", ""
+    syllables = lazy_pinyin(name, style=Style.NORMAL, errors="ignore")
+    initials = lazy_pinyin(name, style=Style.FIRST_LETTER, errors="ignore")
+    return "".join(syllables).lower(), "".join(initials).lower()
+
+
+def _name_matches(query: str, candidate_name: str) -> bool:
+    if not query:
+        return True
+    if query in candidate_name:
+        return True
+    normalized_query = _normalize_pinyin(query)
+    if not normalized_query:
+        return False
+    full_pinyin, initials = _pinyin_name_forms(candidate_name)
+    return normalized_query in full_pinyin or normalized_query in initials
 
 
 def extract_college_id(record: dict[str, Any]) -> int | None:
@@ -240,7 +266,7 @@ class ExperimentalQueryIndex:
         """Execute a boolean query.
 
         Request fields:
-        - name: optional string, substring matched against the teacher name.
+        - name: optional string, substring matched against teacher name or pinyin.
         - collegeId: optional int, exact matched against the teacher college id.
         - keywords: optional list[str], all keywords are connected with OR.
         """
@@ -293,7 +319,10 @@ class ExperimentalQueryIndex:
             candidates = {
                 doc_id
                 for doc_id in candidates
-                if lowered_name in str(self.metadata[doc_id].get("name", "")).lower()
+                if _name_matches(
+                    lowered_name,
+                    str(self.metadata[doc_id].get("name", "")).lower(),
+                )
             }
 
         if college_id is not None:
