@@ -6,6 +6,7 @@ from html import escape
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from client.api_client import RelatedTeacherResult, SearchApiClient, TeacherRecord
+from common.privacy_sanitizer import desensitize_text
 
 
 class DetailDialog(QDialog):
@@ -125,25 +127,46 @@ class DetailDialog(QDialog):
     def _build_sections_tab(self) -> QWidget:
         widget = QWidget()
         outer = QVBoxLayout(widget)
+
+        desensitize_checkbox = QCheckBox("脱敏显示")
+        desensitize_checkbox.setChecked(True)
+        outer.addWidget(desensitize_checkbox)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content = QWidget()
         layout = QVBoxLayout(content)
 
-        sections = self.record.sections or self.record.raw.get("text", {}).get("sections", [])
-        if sections:
-            for section in sections:
-                heading = section.get("heading") or "未命名段落"
-                paragraphs = [p for p in section.get("paragraphs", []) if p]
-                if not paragraphs:
-                    continue
-                layout.addWidget(self._section_label(heading))
-                for paragraph in paragraphs:
-                    layout.addWidget(self._content_label(paragraph))
-        else:
-            layout.addWidget(QLabel("暂无结构化文本"))
+        def render_sections() -> None:
+            while layout.count():
+                item = layout.takeAt(0)
+                child = item.widget()
+                if child is not None:
+                    child.deleteLater()
 
-        layout.addStretch()
+            sections = self.record.sections or self.record.raw.get("text", {}).get("sections", [])
+            if sections:
+                for section in sections:
+                    heading = section.get("heading") or "未命名段落"
+                    paragraphs = [p for p in section.get("paragraphs", []) if p]
+                    if not paragraphs:
+                        continue
+                    layout.addWidget(self._section_label(heading))
+                    for paragraph in paragraphs:
+                        text = (
+                            desensitize_text(paragraph)
+                            if desensitize_checkbox.isChecked()
+                            else paragraph
+                        )
+                        layout.addWidget(self._content_label(text))
+            else:
+                layout.addWidget(QLabel("暂无结构化文本"))
+
+            layout.addStretch()
+
+        desensitize_checkbox.toggled.connect(render_sections)
+        render_sections()
+
         scroll.setWidget(content)
         outer.addWidget(scroll)
         return widget
