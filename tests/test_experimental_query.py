@@ -75,6 +75,26 @@ class ExperimentalQueryTest(unittest.TestCase):
             self.assertEqual(len(response["results"]), 1)
             self.assertEqual(response["results"][0]["profile"]["name"], "陈伟")
 
+    def test_name_filter_supports_full_pinyin_and_initials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index_path = self._build_sample_index(root)
+            query_index = ExperimentalQueryIndex(index_path=index_path)
+
+            full_pinyin_response = query_index.query(
+                {"name": "chenwei", "collegeId": None, "keywords": []}
+            )
+            initials_response = query_index.query(
+                {"name": "cw", "collegeId": None, "keywords": []}
+            )
+
+            self.assertEqual(len(full_pinyin_response["results"]), 1)
+            self.assertEqual(
+                full_pinyin_response["results"][0]["profile"]["name"], "陈伟"
+            )
+            self.assertEqual(len(initials_response["results"]), 1)
+            self.assertEqual(initials_response["results"][0]["profile"]["name"], "陈伟")
+
 
 if __name__ == "__main__":
     _ = unittest.main()
