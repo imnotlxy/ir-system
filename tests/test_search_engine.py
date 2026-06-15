@@ -24,6 +24,15 @@ class SearchEngineTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls._index_cache_dir.cleanup()
 
+    def _write_sample_synonyms(self, root: Path) -> None:
+        (root / "synonyms.json").write_text(
+            json.dumps(
+                {"知识图谱": ["KG"], "自然语言处理": ["NLP", "计算语言学"]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
     def _write_sample_data(self, root: Path) -> None:
         records = [
             {
@@ -36,11 +45,11 @@ class SearchEngineTest(unittest.TestCase):
                 "profile": {
                     "name": "陈伟",
                     "title": "教授",
-                    "research_directions": "知识图谱 数据挖掘",
+                    "research_directions": "知识图谱 数据挖掘 自然语言处理",
                     "representative_works": ["知识图谱论文"],
                 },
                 "text": {
-                    "full_text": "陈伟教授研究知识图谱和数据挖掘",
+                    "full_text": "陈伟教授研究知识图谱、数据挖掘和自然语言处理",
                     "sections": [
                         {"heading": "个人简介", "paragraphs": ["长期从事知识图谱研究"]}
                     ],
@@ -59,7 +68,10 @@ class SearchEngineTest(unittest.TestCase):
                     "title": "副教授",
                     "research_directions": "推荐系统",
                 },
-                "text": {"full_text": "李明研究推荐系统", "sections": []},
+                "text": {
+                    "full_text": "李明研究推荐系统、文本分类和计算方法",
+                    "sections": [],
+                },
                 "raw_api": {},
             },
         ]
@@ -132,6 +144,48 @@ class SearchEngineTest(unittest.TestCase):
 
         self.assertIn("莫建华", names)
         self.assertIn("周建康", names)
+
+    def test_synonym_query_expansion_matches_equivalent_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+            self._write_sample_synonyms(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            results = engine.search("KG", top_k=3)
+
+            self.assertTrue(results)
+            names = {result.record.name for result in results}
+            self.assertIn("陈伟", names)
+            self.assertNotIn("李明", names)
+
+    def test_synonym_phrase_expansion_does_not_match_single_component(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+            self._write_sample_synonyms(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            results = engine.search("NLP", top_k=10)
+            names = {result.record.name for result in results}
+
+            self.assertIn("陈伟", names)
+            self.assertNotIn("李明", names)
+
+    def test_synonym_query_expansion_works_in_field_search(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+            self._write_sample_synonyms(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            results = engine.search("KG", search_field="research", top_k=3)
+
+            self.assertTrue(results)
+            self.assertEqual(results[0].record.name, "陈伟")
 
     def test_pinyin_query_finds_teacher_name_by_full_pinyin_and_initials(self) -> None:
         full_pinyin_results = self.engine.search("zhouguodong", top_k=3)
