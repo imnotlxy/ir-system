@@ -64,6 +64,16 @@ class SearchResult:
     relaxed: bool = False
 
 
+@dataclass
+class RelatedTeacherResult:
+    """A teacher related to the selected teacher, with explanation details."""
+
+    record: TeacherRecord
+    score: float
+    reasons: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+
+
 class SearchEngine:
     """Full-text search engine with BM25, TF-IDF, fuzzy matching, and query relaxation."""
 
@@ -608,6 +618,203 @@ class SearchEngine:
     # ------------------------------------------------------------------
     # Search methods
     # ------------------------------------------------------------------
+
+    def related_teachers(
+        self,
+        record_payload: dict,
+        *,
+        top_k: int = 10,
+    ) -> list[RelatedTeacherResult]:
+        """Return teachers related to the selected teacher."""
+        if not self._loaded:
+            self.load_data()
+
+        source_idx = self._find_record_index(record_payload)
+        if source_idx is None:
+            raise ValueError("teacher record not found")
+
+        source_record = self.records[source_idx]
+        source_vector = self._related_text_vector(source_record)
+        results: list[RelatedTeacherResult] = []
+
+        for idx, record in enumerate(self.records):
+            if idx == source_idx:
+                continue
+
+            record_vector = self._related_text_vector(record)
+            score, reasons, keywords = self._related_teacher_score(
+                source_record,
+                source_vector,
+                record,
+                record_vector,
+            )
+            if score > 0:
+                results.append(
+                    RelatedTeacherResult(
+                        record=record,
+                        score=score,
+                        reasons=reasons,
+                        keywords=keywords,
+                    )
+                )
+
+        results.sort(key=lambda result: result.score, reverse=True)
+        return results[:top_k]
+
+    def _find_record_index(self, record_payload: dict) -> int | None:
+        raw = record_payload.get("raw")
+        if not isinstance(raw, dict):
+            raw = {}
+
+        source = raw.get("source")
+        if not isinstance(source, dict):
+            source = {}
+
+        profile = raw.get("profile")
+        if not isinstance(profile, dict):
+            profile = {}
+
+        detail_url = str(
+            record_payload.get("detail_url") or source.get("detail_url") or ""
+        )
+        name = str(record_payload.get("name") or profile.get("name") or "")
+        college_id = self._safe_int(
+            record_payload.get("college_id") or source.get("college_id") or 0
+        )
+
+        if detail_url:
+            for idx, record in enumerate(self.records):
+                if record.detail_url == detail_url:
+                    return idx
+
+        if name and college_id:
+            for idx, record in enumerate(self.records):
+                if record.name == name and record.college_id == college_id:
+                    return idx
+
+        if name:
+            for idx, record in enumerate(self.records):
+                if record.name == name:
+                    return idx
+
+        return None
+
+    @staticmethod
+    def _safe_int(value: object) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _related_teacher_score(
+        self,
+        source_record: TeacherRecord,
+        source_vector: Counter[str],
+        record: TeacherRecord,
+        record_vector: Counter[str],
+    ) -> tuple[float, list[str], list[str]]:
+        text_similarity = self._related_cosine(source_vector, record_vector)
+        text_score = text_similarity * 60.0
+
+        reasons: list[str] = []
+        if text_score >= 1.0:
+            reasons.append(f"研究文本相似 {text_score:.1f}/60")
+
+        college_score = 0.0
+        if source_record.college and source_record.college == record.college:
+            college_score = 20.0
+            reasons.append("同学院")
+
+        career_score = 0.0
+        career_reason = self._career_reason(source_record.career, record.career)
+        if career_reason:
+            career_score = 10.0
+            reasons.append(career_reason)
+
+        keywords = self._shared_related_keywords(source_vector, record_vector)
+        keyword_score = min(len(keywords) * 2.0, 10.0)
+        if keywords:
+            reasons.append("共同关键词：" + "、".join(keywords[:5]))
+
+        total = min(100.0, text_score + college_score + career_score + keyword_score)
+        return total, reasons, keywords[:10]
+
+    def _related_text_vector(self, record: TeacherRecord) -> Counter[str]:
+        parts = [
+            (record.research, 3.0),
+            (record.intro, 2.0),
+            (record.projects, 1.5),
+            (" ".join(record.representative_works), 1.5),
+            (record.education, 1.0),
+        ]
+        vector: Counter[str] = Counter()
+        for text, weight in parts:
+            for token in self._tokenize_for_index(text):
+                if self._is_related_token(token):
+                    vector[token] += weight
+        return vector
+
+    @staticmethod
+    def _is_related_token(token: str) -> bool:
+        token = token.strip()
+        return len(token) >= 2 and not token.isdigit()
+
+    def _related_cosine(
+        self,
+        left: Counter[str],
+        right: Counter[str],
+    ) -> float:
+        if not left or not right:
+            return 0.0
+
+        left_tfidf = self._related_tfidf_vector(left)
+        right_tfidf = self._related_tfidf_vector(right)
+        dot = sum(
+            left_tfidf[token] * right_tfidf.get(token, 0.0) for token in left_tfidf
+        )
+        left_norm = math.sqrt(sum(value * value for value in left_tfidf.values()))
+        right_norm = math.sqrt(sum(value * value for value in right_tfidf.values()))
+        if left_norm == 0 or right_norm == 0:
+            return 0.0
+        return dot / (left_norm * right_norm)
+
+    def _related_tfidf_vector(self, vector: Counter[str]) -> dict[str, float]:
+        total_records = max(len(self.records), 1)
+        return {
+            token: weight
+            * (math.log((total_records + 1) / (self.doc_freq.get(token, 0) + 1)) + 1.0)
+            for token, weight in vector.items()
+        }
+
+    @staticmethod
+    def _career_reason(source_career: str, career: str) -> str:
+        if source_career and source_career == career:
+            return "职称相同"
+
+        source_rank = SearchEngine._career_rank(source_career)
+        rank = SearchEngine._career_rank(career)
+        if source_rank and source_rank == rank:
+            return f"职称相近：{rank}"
+        return ""
+
+    @staticmethod
+    def _career_rank(career: str) -> str:
+        for rank in ("副教授", "教授", "讲师", "副研究员", "研究员"):
+            if rank in career:
+                return rank
+        return ""
+
+    @staticmethod
+    def _shared_related_keywords(
+        left: Counter[str],
+        right: Counter[str],
+    ) -> list[str]:
+        shared = set(left) & set(right)
+        return sorted(
+            shared,
+            key=lambda token: (min(left[token], right[token]), len(token), token),
+            reverse=True,
+        )
 
     def search(
         self,

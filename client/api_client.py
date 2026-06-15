@@ -52,6 +52,14 @@ class TeacherRecord:
             detail_url=payload.get("detail_url") or "",
         )
 
+    def to_lookup_payload(self) -> dict[str, Any]:
+        return {
+            "raw": self.raw,
+            "name": self.name,
+            "college_id": self.college_id,
+            "detail_url": self.detail_url,
+        }
+
 
 @dataclass
 class SearchResult:
@@ -67,6 +75,23 @@ class SearchResult:
             score=float(payload.get("score") or 0.0),
             match_mode=payload.get("match_mode") or "exact",
             relaxed=bool(payload.get("relaxed", False)),
+        )
+
+
+@dataclass
+class RelatedTeacherResult:
+    record: TeacherRecord
+    score: float
+    reasons: list[str]
+    keywords: list[str]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RelatedTeacherResult":
+        return cls(
+            record=TeacherRecord.from_dict(payload.get("record") or {}),
+            score=float(payload.get("score") or 0.0),
+            reasons=[str(item) for item in payload.get("reasons") or []],
+            keywords=[str(item) for item in payload.get("keywords") or []],
         )
 
 
@@ -107,6 +132,18 @@ class SearchApiClient:
         data = self._request("POST", "search", payload)
         results = [SearchResult.from_dict(item) for item in data.get("results", [])]
         return results, float(data.get("elapsed") or 0.0), data.get("mode_info") or ""
+
+    def related_teachers(
+        self,
+        record: TeacherRecord,
+        *,
+        top_k: int = 10,
+    ) -> list[RelatedTeacherResult]:
+        payload = {"record": record.to_lookup_payload(), "top_k": top_k}
+        data = self._request("POST", "related-teachers", payload)
+        return [
+            RelatedTeacherResult.from_dict(item) for item in data.get("results", [])
+        ]
 
     def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None

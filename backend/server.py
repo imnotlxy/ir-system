@@ -15,7 +15,12 @@ from typing import Any
 from backend.experimental_query import ExperimentalQueryIndex
 from backend.llm_query_weight import LlmQueryWeightError, compute_query_weights
 from backend.llm_rerank import LlmRerankError, rerank
-from backend.search_engine import SearchEngine, SearchResult, TeacherRecord
+from backend.search_engine import (
+    RelatedTeacherResult,
+    SearchEngine,
+    SearchResult,
+    TeacherRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,15 @@ def _result_to_dict(result: SearchResult) -> dict[str, Any]:
     }
 
 
+def _related_result_to_dict(result: RelatedTeacherResult) -> dict[str, Any]:
+    return {
+        "record": _record_to_dict(result.record),
+        "score": result.score,
+        "reasons": result.reasons,
+        "keywords": result.keywords,
+    }
+
+
 def _build_mode_info(results: list[SearchResult]) -> str:
     if not results:
         return "无结果"
@@ -81,6 +95,18 @@ class SearchApi:
 
     def experimental_query(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.experimental_index.query(payload)
+
+    def related_teachers(self, payload: dict[str, Any]) -> dict[str, Any]:
+        record_payload = payload.get("record")
+        if not isinstance(record_payload, dict):
+            raise ValueError("record is required")
+
+        top_k = int(payload.get("top_k") or 10)
+        if top_k <= 0:
+            top_k = 10
+
+        results = self.engine.related_teachers(record_payload, top_k=top_k)
+        return {"results": [_related_result_to_dict(result) for result in results]}
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = str(payload.get("query", "")).strip()
@@ -168,7 +194,12 @@ def make_handler(api: SearchApi) -> type[BaseHTTPRequestHandler]:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
 
         def do_POST(self) -> None:
-            if self.path not in {"/search", "/experimental-query", "/query"}:
+            if self.path not in {
+                "/search",
+                "/experimental-query",
+                "/query",
+                "/related-teachers",
+            }:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
                 return
 
@@ -176,6 +207,8 @@ def make_handler(api: SearchApi) -> type[BaseHTTPRequestHandler]:
                 payload = self._read_json()
                 if self.path in {"/experimental-query", "/query"}:
                     self._send_json(api.experimental_query(payload))
+                elif self.path == "/related-teachers":
+                    self._send_json(api.related_teachers(payload))
                 else:
                     self._send_json(api.search(payload))
             except ValueError as exc:

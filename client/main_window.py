@@ -556,7 +556,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _show_detail(self, record) -> None:
-        dialog = DetailDialog(record, self)
+        dialog = DetailDialog(record, self, self.api_client)
         dialog.exec()
 
     def _on_table_double_click(self, index) -> None:
