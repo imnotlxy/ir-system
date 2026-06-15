@@ -97,6 +97,9 @@ class SearchApi:
         return self.experimental_index.query(payload)
 
     def related_teachers(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.advanced:
+            raise ValueError("related_teachers requires advanced mode")
+
         record_payload = payload.get("record")
         if not isinstance(record_payload, dict):
             raise ValueError("record is required")

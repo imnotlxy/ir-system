@@ -59,10 +59,10 @@ class DetailDialog(QDialog):
         college_label.setStyleSheet("font-size: 13px;")
         header.addWidget(college_label)
 
-        self.related_btn = QPushButton("查找相近教师")
-        self.related_btn.setEnabled(self.api_client is not None)
-        self.related_btn.clicked.connect(self._load_related_teachers)
-        header.addWidget(self.related_btn)
+        if self.api_client is not None:
+            self.related_btn = QPushButton("查找相近教师")
+            self.related_btn.clicked.connect(self._load_related_teachers)
+            header.addWidget(self.related_btn)
         layout.addLayout(header)
 
         # Tabs
@@ -70,8 +70,9 @@ class DetailDialog(QDialog):
         self.tabs.addTab(self._build_info_tab(), "基本信息")
         self.tabs.addTab(self._build_sections_tab(), "结构化文本")
         self.tabs.addTab(self._build_works_tab(), "代表作")
-        self.related_tab = self._build_related_tab()
-        self.tabs.addTab(self.related_tab, "相近教师")
+        if self.api_client is not None:
+            self.related_tab = self._build_related_tab()
+            self.tabs.addTab(self.related_tab, "相近教师")
         layout.addWidget(self.tabs)
 
     def _build_info_tab(self) -> QWidget:
