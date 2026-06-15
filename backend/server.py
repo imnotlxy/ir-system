@@ -15,7 +15,12 @@ from typing import Any
 from backend.experimental_query import ExperimentalQueryIndex
 from backend.llm_query_weight import LlmQueryWeightError, compute_query_weights
 from backend.llm_rerank import LlmRerankError, rerank
-from backend.search_engine import SearchEngine, SearchResult, TeacherRecord
+from backend.search_engine import (
+    RelatedTeacherResult,
+    SearchEngine,
+    SearchResult,
+    TeacherRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,15 @@ def _result_to_dict(result: SearchResult) -> dict[str, Any]:
     }
 
 
+def _related_result_to_dict(result: RelatedTeacherResult) -> dict[str, Any]:
+    return {
+        "record": _record_to_dict(result.record),
+        "score": result.score,
+        "reasons": result.reasons,
+        "keywords": result.keywords,
+    }
+
+
 def _build_mode_info(results: list[SearchResult]) -> str:
     if not results:
         return "无结果"
@@ -82,6 +96,21 @@ class SearchApi:
     def experimental_query(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.experimental_index.query(payload)
 
+    def related_teachers(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.advanced:
+            raise ValueError("related_teachers requires advanced mode")
+
+        record_payload = payload.get("record")
+        if not isinstance(record_payload, dict):
+            raise ValueError("record is required")
+
+        top_k = int(payload.get("top_k") or 10)
+        if top_k <= 0:
+            top_k = 10
+
+        results = self.engine.related_teachers(record_payload, top_k=top_k)
+        return {"results": [_related_result_to_dict(result) for result in results]}
+
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = str(payload.get("query", "")).strip()
         if not query:
@@ -99,6 +128,7 @@ class SearchApi:
         llm_query_weight = (
             bool(payload.get("llm_query_weight", False)) and self.advanced
         )
+        research_filter = str(payload.get("research_filter", ""))
 
         token_weights: dict[str, float] | None = None
         if llm_query_weight:
@@ -120,7 +150,7 @@ class SearchApi:
             query,
             ranking=ranking,
             college_filter=college_filter,
-            research_filter=str(payload.get("research_filter", "")),
+            research_filter=research_filter,
             auto_relax=auto_relax,
             search_field=str(payload.get("search_field", "")),
             top_k=int(payload.get("top_k", 50)),
@@ -148,10 +178,20 @@ class SearchApi:
                 logger.error("LLM reranking failed: query=%r error=%s", query, exc)
 
         elapsed = time.perf_counter() - t0
+        suggestions = []
+        if self.advanced and not results:
+            suggestions = self.engine.suggest_name_by_pinyin(
+                query,
+                college_filter=college_filter,
+                research_filter=research_filter,
+                top_k=1,
+            )
+
         return {
             "results": [_result_to_dict(result) for result in results],
             "elapsed": elapsed,
             "mode_info": mode_info,
+            "suggestions": suggestions,
         }
 
 
@@ -168,7 +208,12 @@ def make_handler(api: SearchApi) -> type[BaseHTTPRequestHandler]:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
 
         def do_POST(self) -> None:
-            if self.path not in {"/search", "/experimental-query", "/query"}:
+            if self.path not in {
+                "/search",
+                "/experimental-query",
+                "/query",
+                "/related-teachers",
+            }:
                 self._send_error(HTTPStatus.NOT_FOUND, "not found")
                 return
 
@@ -176,6 +221,8 @@ def make_handler(api: SearchApi) -> type[BaseHTTPRequestHandler]:
                 payload = self._read_json()
                 if self.path in {"/experimental-query", "/query"}:
                     self._send_json(api.experimental_query(payload))
+                elif self.path == "/related-teachers":
+                    self._send_json(api.related_teachers(payload))
                 else:
                     self._send_json(api.search(payload))
             except ValueError as exc:

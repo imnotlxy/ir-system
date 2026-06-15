@@ -202,6 +202,115 @@ class SearchEngineTest(unittest.TestCase):
         self.assertTrue(initials_results)
         self.assertEqual(initials_results[0].record.name, "周国栋")
 
+    def test_suggest_name_by_pinyin_handles_chinese_homophone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            suggestions = engine.suggest_name_by_pinyin("陈未", top_k=1)
+
+            self.assertEqual(suggestions, ["陈伟"])
+
+    def test_suggest_name_by_pinyin_handles_latin_typo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            suggestions = engine.suggest_name_by_pinyin("chenweu", top_k=1)
+
+            self.assertEqual(suggestions, ["陈伟"])
+
+    def test_related_teachers_ranks_shared_research_above_unrelated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = [
+                {
+                    "schema_version": 2,
+                    "source": {
+                        "college_id": 15,
+                        "college_name": "计算机科学与技术学院",
+                        "detail_url": "https://example.test/a",
+                    },
+                    "profile": {
+                        "name": "陈伟",
+                        "title": "教授",
+                        "research_directions": "知识图谱 数据挖掘 自然语言处理",
+                        "representative_works": ["知识图谱与自然语言处理论文"],
+                    },
+                    "text": {
+                        "full_text": "陈伟教授研究知识图谱、数据挖掘和自然语言处理",
+                        "sections": [
+                            {
+                                "heading": "个人简介",
+                                "paragraphs": ["长期从事知识图谱和自然语言处理研究"],
+                            }
+                        ],
+                    },
+                    "raw_api": {},
+                },
+                {
+                    "schema_version": 2,
+                    "source": {
+                        "college_id": 15,
+                        "college_name": "计算机科学与技术学院",
+                        "detail_url": "https://example.test/b",
+                    },
+                    "profile": {
+                        "name": "赵强",
+                        "title": "教授",
+                        "research_directions": "知识图谱 自然语言处理 文本挖掘",
+                        "representative_works": ["自然语言处理论文"],
+                    },
+                    "text": {
+                        "full_text": "赵强教授研究知识图谱、自然语言处理和文本挖掘",
+                        "sections": [
+                            {
+                                "heading": "个人简介",
+                                "paragraphs": ["主要方向包括知识图谱和自然语言处理"],
+                            }
+                        ],
+                    },
+                    "raw_api": {},
+                },
+                {
+                    "schema_version": 2,
+                    "source": {
+                        "college_id": 86,
+                        "college_name": "材料与化学化工学部",
+                        "detail_url": "https://example.test/c",
+                    },
+                    "profile": {
+                        "name": "王磊",
+                        "title": "讲师",
+                        "research_directions": "高分子材料 催化反应",
+                    },
+                    "text": {
+                        "full_text": "王磊研究高分子材料与催化反应",
+                        "sections": [],
+                    },
+                    "raw_api": {},
+                },
+            ]
+            with (root / "teachers.jsonl").open("w", encoding="utf-8") as file:
+                for record in records:
+                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            results = engine.related_teachers(
+                {"detail_url": "https://example.test/a"},
+                top_k=2,
+            )
+
+            self.assertTrue(results)
+            self.assertEqual(results[0].record.name, "赵强")
+            self.assertNotIn("陈伟", {result.record.name for result in results})
+            self.assertTrue(results[0].reasons)
+
 
 if __name__ == "__main__":
     _ = unittest.main()
