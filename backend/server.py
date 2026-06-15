@@ -128,6 +128,7 @@ class SearchApi:
         llm_query_weight = (
             bool(payload.get("llm_query_weight", False)) and self.advanced
         )
+        research_filter = str(payload.get("research_filter", ""))
 
         token_weights: dict[str, float] | None = None
         if llm_query_weight:
@@ -149,7 +150,7 @@ class SearchApi:
             query,
             ranking=ranking,
             college_filter=college_filter,
-            research_filter=str(payload.get("research_filter", "")),
+            research_filter=research_filter,
             auto_relax=auto_relax,
             search_field=str(payload.get("search_field", "")),
             top_k=int(payload.get("top_k", 50)),
@@ -177,10 +178,20 @@ class SearchApi:
                 logger.error("LLM reranking failed: query=%r error=%s", query, exc)
 
         elapsed = time.perf_counter() - t0
+        suggestions = []
+        if self.advanced and not results:
+            suggestions = self.engine.suggest_name_by_pinyin(
+                query,
+                college_filter=college_filter,
+                research_filter=research_filter,
+                top_k=1,
+            )
+
         return {
             "results": [_result_to_dict(result) for result in results],
             "elapsed": elapsed,
             "mode_info": mode_info,
+            "suggestions": suggestions,
         }
 
 

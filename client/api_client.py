@@ -117,7 +117,7 @@ class SearchApiClient:
         llm_rerank: bool = False,
         llm_query_weight: bool = False,
         pinyin_query: bool = False,
-    ) -> tuple[list[SearchResult], float, str]:
+    ) -> tuple[list[SearchResult], float, str, list[str]]:
         payload = {
             "query": query,
             "ranking": ranking,
@@ -131,7 +131,13 @@ class SearchApiClient:
         }
         data = self._request("POST", "search", payload)
         results = [SearchResult.from_dict(item) for item in data.get("results", [])]
-        return results, float(data.get("elapsed") or 0.0), data.get("mode_info") or ""
+        suggestions = [str(item) for item in data.get("suggestions") or []]
+        return (
+            results,
+            float(data.get("elapsed") or 0.0),
+            data.get("mode_info") or "",
+            suggestions,
+        )
 
     def related_teachers(
         self,

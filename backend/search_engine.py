@@ -7,7 +7,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from difflib import get_close_matches
+from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
 
 import jieba
@@ -660,6 +660,99 @@ class SearchEngine:
 
         results.sort(key=lambda result: result.score, reverse=True)
         return results[:top_k]
+
+    def suggest_name_by_pinyin(
+        self,
+        query: str,
+        *,
+        college_filter: list[str] | None = None,
+        research_filter: str = "",
+        top_k: int = 1,
+    ) -> list[str]:
+        """Suggest teacher names by similar full pinyin or pinyin initials."""
+        if not self._loaded:
+            self.load_data()
+
+        query_forms = self._name_suggestion_query_forms(query)
+        if not query_forms:
+            return []
+
+        scored: list[tuple[float, str]] = []
+        for record in self.records:
+            if not self._record_passes_filters(
+                record,
+                college_filter=college_filter,
+                research_filter=research_filter,
+            ):
+                continue
+
+            score = self._name_pinyin_similarity(query_forms, record)
+            if score >= 75.0:
+                scored.append((score, record.name))
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for _, name in sorted(scored, key=lambda item: (item[0], item[1]), reverse=True):
+            if name and name not in seen:
+                names.append(name)
+                seen.add(name)
+            if len(names) >= top_k:
+                break
+        return names
+
+    @staticmethod
+    def _name_suggestion_query_forms(query: str) -> list[str]:
+        query = query.strip()
+        if not query:
+            return []
+
+        forms: list[str] = []
+        latin = SearchEngine._normalize_pinyin_query(query)
+        if latin:
+            forms.append(latin)
+
+        if re.search(r"[\u4e00-\u9fff]", query):
+            syllables = lazy_pinyin(query, style=Style.NORMAL, errors="ignore")
+            initials = lazy_pinyin(query, style=Style.FIRST_LETTER, errors="ignore")
+            full = "".join(syllables).lower()
+            short = "".join(initials).lower()
+            for value in (full, short):
+                if value and value not in forms:
+                    forms.append(value)
+
+        return forms
+
+    @staticmethod
+    def _name_pinyin_similarity(
+        query_forms: list[str],
+        record: TeacherRecord,
+    ) -> float:
+        scores: list[float] = []
+        for query in query_forms:
+            if not query:
+                continue
+
+            full = record.name_pinyin
+            initials = record.name_pinyin_initials
+            if full:
+                if query == full:
+                    scores.append(100.0)
+                elif query in full or full in query:
+                    scores.append(85.0 - abs(len(full) - len(query)) * 0.5)
+                else:
+                    scores.append(SequenceMatcher(None, query, full).ratio() * 100.0)
+
+            if initials:
+                if query == initials:
+                    scores.append(95.0)
+                elif query in initials or initials in query:
+                    scores.append(80.0 - abs(len(initials) - len(query)) * 2.0)
+                else:
+                    scores.append(
+                        SequenceMatcher(None, query, initials).ratio() * 90.0
+                    )
+
+        return max(scores, default=0.0)
 
     def _find_record_index(self, record_payload: dict) -> int | None:
         raw = record_payload.get("raw")

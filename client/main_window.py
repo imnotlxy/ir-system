@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -32,7 +34,7 @@ PAGE_SIZE = 20
 class SearchWorker(QThread):
     """Background thread for search operations."""
 
-    results_ready = pyqtSignal(list, float, str)  # results, elapsed, mode_info
+    results_ready = pyqtSignal(list, float, str, list)
     error_occurred = pyqtSignal(str)
 
     def __init__(
@@ -62,7 +64,7 @@ class SearchWorker(QThread):
 
     def run(self) -> None:
         try:
-            results, elapsed, mode_info = self.api_client.search(
+            results, elapsed, mode_info, suggestions = self.api_client.search(
                 self.query,
                 ranking=self.ranking,
                 college_filter=self.college_filter,
@@ -73,7 +75,7 @@ class SearchWorker(QThread):
                 llm_query_weight=self.llm_query_weight,
                 pinyin_query=self.pinyin_query,
             )
-            self.results_ready.emit(results, elapsed, mode_info)
+            self.results_ready.emit(results, elapsed, mode_info, suggestions)
         except Exception as e:
             self.error_occurred.emit(str(e))
 
@@ -97,6 +99,7 @@ class MainWindow(QMainWindow):
         self._search_request_id = 0
         self._search_pending = False
         self._last_query = ""
+        self.current_suggestions: list[str] = []
         self._updating_college_checks = False
 
         self.setWindowTitle("苏州大学导师信息垂直检索系统")
@@ -302,6 +305,8 @@ class MainWindow(QMainWindow):
         self.results_state_label = QLabel("请输入查询词开始检索")
         self.results_state_label.setObjectName("resultsStateLabel")
         self.results_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.results_state_label.setOpenExternalLinks(False)
+        self.results_state_label.linkActivated.connect(self._on_suggestion_clicked)
 
         layout.addWidget(self.results_state_label)
         layout.addWidget(self.results_table, 1)
@@ -409,8 +414,8 @@ class MainWindow(QMainWindow):
             pinyin_query=pinyin_query,
         )
         self._search_worker.results_ready.connect(
-            lambda results, elapsed, mode_info, rid=request_id: self._on_search_done(
-                rid, results, elapsed, mode_info
+            lambda results, elapsed, mode_info, suggestions, rid=request_id: self._on_search_done(
+                rid, results, elapsed, mode_info, suggestions
             )
         )
         self._search_worker.error_occurred.connect(
@@ -424,11 +429,13 @@ class MainWindow(QMainWindow):
         results: list[SearchResult],
         elapsed: float,
         mode_info: str,
+        suggestions: list[str],
     ) -> None:
         if request_id != self._search_request_id:
             return
         self._search_pending = False
         self.current_results = results
+        self.current_suggestions = suggestions
         self.current_page = 0
         self._render_page()
 
@@ -466,9 +473,12 @@ class MainWindow(QMainWindow):
         page_results = results[start:end]
 
         self.results_table.setRowCount(len(page_results))
-        self._show_results_state(
-            empty_message or ("未找到匹配结果" if total == 0 else "")
-        )
+        if empty_message:
+            self._show_results_state(empty_message)
+        elif total == 0:
+            self._show_results_state("未找到匹配结果", self.current_suggestions)
+        else:
+            self._show_results_state("")
 
         for row, result in enumerate(page_results):
             r = result.record
@@ -616,9 +626,36 @@ class MainWindow(QMainWindow):
             item.setToolTip(tooltip)
         self.results_table.setItem(row, column, item)
 
-    def _show_results_state(self, message: str) -> None:
-        self.results_state_label.setText(message)
+    def _show_results_state(
+        self,
+        message: str,
+        suggestions: list[str] | None = None,
+    ) -> None:
+        self.current_suggestions = suggestions or []
+        if self.current_suggestions:
+            suggestion = escape(self.current_suggestions[0])
+            self.results_state_label.setTextFormat(Qt.TextFormat.RichText)
+            self.results_state_label.setText(
+                f'{escape(message)}。你是不是要找：'
+                f'<a href="suggestion:0">{suggestion}</a>'
+            )
+        else:
+            self.results_state_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.results_state_label.setText(message)
         self.results_state_label.setVisible(bool(message))
+
+    def _on_suggestion_clicked(self, link: str) -> None:
+        prefix = "suggestion:"
+        if not link.startswith(prefix):
+            return
+        index_text = link[len(prefix) :]
+        if not index_text.isdigit():
+            return
+        index = int(index_text)
+        if index < 0 or index >= len(self.current_suggestions):
+            return
+        self.search_input.setText(self.current_suggestions[index])
+        self._on_search()
 
     def _update_search_controls(self) -> None:
         self.search_btn.setEnabled(not self._search_pending)

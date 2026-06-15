@@ -202,6 +202,28 @@ class SearchEngineTest(unittest.TestCase):
         self.assertTrue(initials_results)
         self.assertEqual(initials_results[0].record.name, "周国栋")
 
+    def test_suggest_name_by_pinyin_handles_chinese_homophone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            suggestions = engine.suggest_name_by_pinyin("陈未", top_k=1)
+
+            self.assertEqual(suggestions, ["陈伟"])
+
+    def test_suggest_name_by_pinyin_handles_latin_typo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+
+            engine = SearchEngine(root)
+            engine.load_data()
+            suggestions = engine.suggest_name_by_pinyin("chenweu", top_k=1)
+
+            self.assertEqual(suggestions, ["陈伟"])
+
     def test_related_teachers_ranks_shared_research_above_unrelated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
