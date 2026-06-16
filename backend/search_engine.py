@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
+from typing import Mapping
 
 import jieba
 from pypinyin import Style, lazy_pinyin  # type: ignore[import-not-found]
@@ -16,6 +17,7 @@ from pypinyin import Style, lazy_pinyin  # type: ignore[import-not-found]
 SEARCH_INDEX_SCHEMA_VERSION = 3
 DEFAULT_SEARCH_INDEX_SUBDIR = "search_index"
 DEFAULT_SEARCH_INDEX_FILENAME = "index.json"
+RelatedTextVector = dict[str, float]
 
 
 def default_search_index_path(data_dir: str | Path | None = None) -> Path:
@@ -794,6 +796,8 @@ class SearchEngine:
 
     @staticmethod
     def _safe_int(value: object) -> int:
+        if not isinstance(value, int | float | str | bytes | bytearray):
+            return 0
         try:
             return int(value)
         except (TypeError, ValueError):
@@ -802,9 +806,9 @@ class SearchEngine:
     def _related_teacher_score(
         self,
         source_record: TeacherRecord,
-        source_vector: Counter[str],
+        source_vector: RelatedTextVector,
         record: TeacherRecord,
-        record_vector: Counter[str],
+        record_vector: RelatedTextVector,
     ) -> tuple[float, list[str], list[str]]:
         text_similarity = self._related_cosine(source_vector, record_vector)
         text_score = text_similarity * 60.0
@@ -832,7 +836,7 @@ class SearchEngine:
         total = min(100.0, text_score + college_score + career_score + keyword_score)
         return total, reasons, keywords[:10]
 
-    def _related_text_vector(self, record: TeacherRecord) -> Counter[str]:
+    def _related_text_vector(self, record: TeacherRecord) -> RelatedTextVector:
         parts = [
             (record.research, 3.0),
             (record.intro, 2.0),
@@ -840,7 +844,7 @@ class SearchEngine:
             (" ".join(record.representative_works), 1.5),
             (record.education, 1.0),
         ]
-        vector: Counter[str] = Counter()
+        vector: RelatedTextVector = defaultdict(float)
         for text, weight in parts:
             for token in self._tokenize_for_index(text):
                 if self._is_related_token(token):
@@ -854,8 +858,8 @@ class SearchEngine:
 
     def _related_cosine(
         self,
-        left: Counter[str],
-        right: Counter[str],
+        left: Mapping[str, float],
+        right: Mapping[str, float],
     ) -> float:
         if not left or not right:
             return 0.0
@@ -871,7 +875,7 @@ class SearchEngine:
             return 0.0
         return dot / (left_norm * right_norm)
 
-    def _related_tfidf_vector(self, vector: Counter[str]) -> dict[str, float]:
+    def _related_tfidf_vector(self, vector: Mapping[str, float]) -> dict[str, float]:
         total_records = max(len(self.records), 1)
         return {
             token: weight
@@ -899,8 +903,8 @@ class SearchEngine:
 
     @staticmethod
     def _shared_related_keywords(
-        left: Counter[str],
-        right: Counter[str],
+        left: Mapping[str, float],
+        right: Mapping[str, float],
     ) -> list[str]:
         shared = set(left) & set(right)
         return sorted(

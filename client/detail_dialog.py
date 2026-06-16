@@ -140,6 +140,8 @@ class DetailDialog(QDialog):
         def render_sections() -> None:
             while layout.count():
                 item = layout.takeAt(0)
+                if item is None:
+                    continue
                 child = item.widget()
                 if child is not None:
                     child.deleteLater()

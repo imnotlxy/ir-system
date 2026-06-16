@@ -129,7 +129,8 @@ class SearchEngineWeightedScoringTest(unittest.TestCase):
         baseline_chen = next(
             (r for r in baseline if r.record.name == "陈伟"), None
         )
-        self.assertIsNotNone(baseline_chen)
+        if baseline_chen is None:
+            self.fail("Expected baseline results to include 陈伟")
         self.assertGreater(weighted_score, baseline_chen.score)
 
     def test_none_token_weights_is_same_as_baseline(self) -> None:
