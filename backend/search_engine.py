@@ -692,7 +692,9 @@ class SearchEngine:
 
         names: list[str] = []
         seen: set[str] = set()
-        for _, name in sorted(scored, key=lambda item: (item[0], item[1]), reverse=True):
+        for _, name in sorted(
+            scored, key=lambda item: (item[0], item[1]), reverse=True
+        ):
             if name and name not in seen:
                 names.append(name)
                 seen.add(name)
@@ -748,9 +750,7 @@ class SearchEngine:
                 elif query in initials or initials in query:
                     scores.append(80.0 - abs(len(initials) - len(query)) * 2.0)
                 else:
-                    scores.append(
-                        SequenceMatcher(None, query, initials).ratio() * 90.0
-                    )
+                    scores.append(SequenceMatcher(None, query, initials).ratio() * 90.0)
 
         return max(scores, default=0.0)
 
@@ -941,7 +941,7 @@ class SearchEngine:
         if not self._loaded:
             self.load_data()
 
-        if pinyin_query or self._looks_like_pinyin_query(query):
+        if pinyin_query:
             pinyin_results = self._pinyin_name_search(
                 query,
                 college_filter=college_filter,

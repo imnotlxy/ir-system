@@ -128,6 +128,7 @@ class SearchApi:
         llm_query_weight = (
             bool(payload.get("llm_query_weight", False)) and self.advanced
         )
+        pinyin_query = bool(payload.get("pinyin_query", False)) and self.advanced
         research_filter = str(payload.get("research_filter", ""))
 
         token_weights: dict[str, float] | None = None
@@ -155,7 +156,7 @@ class SearchApi:
             search_field=str(payload.get("search_field", "")),
             top_k=int(payload.get("top_k", 50)),
             token_weights=token_weights,
-            pinyin_query=bool(payload.get("pinyin_query", False)),
+            pinyin_query=pinyin_query,
         )
 
         mode_info = _build_mode_info(results)
