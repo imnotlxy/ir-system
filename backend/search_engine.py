@@ -573,12 +573,16 @@ class SearchEngine:
 
         return score / (doc_len * query_len) if (doc_len * query_len) > 0 else 0.0
 
-    def _expanded_query_tokens(self, query_tokens: list[str]) -> list[str]:
+    def _expanded_query_tokens(
+        self, query_tokens: list[str], *, use_synonyms: bool = False
+    ) -> list[str]:
         """Return query tokens plus tokens from the synonym table, preserving order."""
         expanded: list[str] = []
         seen: set[str] = set()
         for token in query_tokens:
-            alternatives = [token, *sorted(self.synonyms.get(token, set()))]
+            alternatives = [token]
+            if use_synonyms:
+                alternatives.extend(sorted(self.synonyms.get(token, set())))
             for alternative in alternatives:
                 if alternative not in seen:
                     expanded.append(alternative)
@@ -586,7 +590,7 @@ class SearchEngine:
         return expanded
 
     def _query_token_alternatives(
-        self, query_tokens: list[str]
+        self, query_tokens: list[str], *, use_synonyms: bool = False
     ) -> list[list[set[str]]]:
         """Return phrase-aware alternatives for each query token.
 
@@ -597,14 +601,19 @@ class SearchEngine:
         groups: list[list[set[str]]] = []
         for token in query_tokens:
             alternatives = [{token}]
-            for alternative in self.synonym_alternatives.get(token, []):
-                if alternative not in alternatives:
-                    alternatives.append(alternative)
+            if use_synonyms:
+                for alternative in self.synonym_alternatives.get(token, []):
+                    if alternative not in alternatives:
+                        alternatives.append(alternative)
             groups.append(alternatives)
         return groups
 
-    def _query_token_groups(self, query_tokens: list[str]) -> list[set[str]]:
+    def _query_token_groups(
+        self, query_tokens: list[str], *, use_synonyms: bool = False
+    ) -> list[set[str]]:
         """Return broad token groups, used only for field token-set checks."""
+        if not use_synonyms:
+            return [{token} for token in query_tokens]
         return [{token, *self.synonyms.get(token, set())} for token in query_tokens]
 
     @staticmethod
@@ -925,6 +934,7 @@ class SearchEngine:
         top_k: int = 50,
         token_weights: dict[str, float] | None = None,
         pinyin_query: bool = False,
+        use_synonyms: bool = False,
     ) -> list[SearchResult]:
         """Execute a search query with the specified options.
 
@@ -938,6 +948,7 @@ class SearchEngine:
             top_k: Maximum number of results to return.
             token_weights: Optional LLM-assigned weights per query token.
             pinyin_query: If True, match Latin pinyin against teacher names.
+            use_synonyms: If True, expand query tokens from the synonym table.
 
         Returns:
             List of SearchResult sorted by score descending.
@@ -970,6 +981,7 @@ class SearchEngine:
                 auto_relax=auto_relax,
                 top_k=top_k,
                 token_weights=token_weights,
+                use_synonyms=use_synonyms,
             )
 
         # Phase 1: exact search (AND logic)
@@ -980,6 +992,7 @@ class SearchEngine:
             college_filter=college_filter,
             research_filter=research_filter,
             token_weights=token_weights,
+            use_synonyms=use_synonyms,
         )
 
         if results:
@@ -994,6 +1007,7 @@ class SearchEngine:
                 college_filter=college_filter,
                 research_filter=research_filter,
                 token_weights=token_weights,
+                use_synonyms=use_synonyms,
             )
             if results:
                 return results[:top_k]
@@ -1097,12 +1111,16 @@ class SearchEngine:
         college_filter: list[str] | None,
         research_filter: str,
         token_weights: dict[str, float] | None = None,
+        use_synonyms: bool = False,
     ) -> list[SearchResult]:
         """Score all candidate documents and return sorted results."""
         # Find candidate docs: every query term must match, while synonyms within
         # the same term are OR-connected.
         candidate_sets: list[set[int]] = []
-        for alternatives in self._query_token_alternatives(query_tokens):
+        for alternatives in self._query_token_alternatives(
+            query_tokens,
+            use_synonyms=use_synonyms,
+        ):
             group_candidates: set[int] = set()
             for alternative in alternatives:
                 alternative_candidates: set[int] | None = None
@@ -1149,7 +1167,10 @@ class SearchEngine:
             return []
 
         # Score with expanded tokens so documents containing synonyms receive credit.
-        score_tokens = self._expanded_query_tokens(query_tokens)
+        score_tokens = self._expanded_query_tokens(
+            query_tokens,
+            use_synonyms=use_synonyms,
+        )
         results: list[SearchResult] = []
         for idx in candidates:
             if ranking == "bm25":
@@ -1186,9 +1207,13 @@ class SearchEngine:
         college_filter: list[str] | None,
         research_filter: str,
         token_weights: dict[str, float] | None = None,
+        use_synonyms: bool = False,
     ) -> list[SearchResult]:
         """Relaxed search: union of any query token match (OR logic)."""
-        score_tokens = self._expanded_query_tokens(query_tokens)
+        score_tokens = self._expanded_query_tokens(
+            query_tokens,
+            use_synonyms=use_synonyms,
+        )
         candidates: set[int] = set()
         for token in score_tokens:
             candidates |= self.inverted_index.get(token, set())
@@ -1267,9 +1292,13 @@ class SearchEngine:
         auto_relax: bool,
         top_k: int,
         token_weights: dict[str, float] | None = None,
+        use_synonyms: bool = False,
     ) -> list[SearchResult]:
         """Search restricted to a single field of each document."""
-        token_alternatives = self._query_token_alternatives(query_tokens)
+        token_alternatives = self._query_token_alternatives(
+            query_tokens,
+            use_synonyms=use_synonyms,
+        )
         candidates: set[int] = set()
         for idx, record in enumerate(self.records):
             ftokens = record.field_tokens.get(field, [])
@@ -1283,7 +1312,10 @@ class SearchEngine:
 
         # Fallback: fuzzy expand + OR logic if auto_relax enabled
         if not candidates and auto_relax:
-            fuzzy_tokens = self._expanded_query_tokens(self._fuzzy_expand(query_tokens))
+            fuzzy_tokens = self._expanded_query_tokens(
+                self._fuzzy_expand(query_tokens),
+                use_synonyms=use_synonyms,
+            )
             for idx, record in enumerate(self.records):
                 ftokens = record.field_tokens.get(field, [])
                 token_set = set(ftokens)
@@ -1312,7 +1344,10 @@ class SearchEngine:
             return []
 
         # Score using expanded tokens so field hits through synonyms rank normally.
-        score_tokens = self._expanded_query_tokens(query_tokens)
+        score_tokens = self._expanded_query_tokens(
+            query_tokens,
+            use_synonyms=use_synonyms,
+        )
         results: list[SearchResult] = []
         for idx in candidates:
             if ranking == "bm25":

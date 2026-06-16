@@ -16,7 +16,7 @@ uv run python main.py --api-url http://127.0.0.1:8000
 
 ### 升级版（--advanced）
 
-升级版启用模糊查询、拼音姓名查询等高级功能，前端会自动从后端读取状态并显示对应 UI。
+升级版启用模糊查询、拼音姓名查询、同义词扩展等高级功能，前端会自动从后端读取状态并显示对应 UI。
 
 ```bash
 # 启动后端
@@ -38,11 +38,11 @@ uv run ir-client --api-url http://127.0.0.1:8000
 
 - `GET /health`：健康检查。
 - `GET /metadata`：返回导师总数、学院列表及 `advanced` 状态。
-- `POST /search`：执行检索，请求体为 JSON，支持 `query`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`、`pinyin_query`。其中 `auto_relax` 仅在后端以 `--advanced` 启动时生效；纯英文字母查询会自动尝试教师姓名拼音匹配，也可显式设置 `pinyin_query=true`，支持全拼和首字母，例如 `zhouguodong` / `zgd` 命中“周国栋”。
+- `POST /search`：执行检索，请求体为 JSON，支持 `query`、`ranking`、`college_filter`、`research_filter`、`auto_relax`、`search_field`、`pinyin_query`、`synonym_query`。其中 `auto_relax`、`pinyin_query`、`synonym_query` 仅在后端以 `--advanced` 启动时生效；`pinyin_query=true` 支持用教师姓名全拼和首字母匹配，例如 `zhouguodong` / `zgd` 命中“周国栋”。
 
   主搜索引擎会把分词结果、倒排索引、文档频率、文档长度和学院列表缓存到 `data/search_index/index.json`。启动后端或调用 `SearchEngine.load_data()` 时，如果缓存与 `data/teachers.jsonl` 的大小和修改时间匹配，会直接加载缓存；否则会自动重建并写回 `data/`。
 
-  主搜索引擎支持查询期同义词扩展，词表位于 `data/synonyms.json`，格式为 `{ "标准词": ["同义词", "缩写"] }`。检索时同一查询词的原词与同义词按 OR 连接，不同查询词仍按 AND 连接；例如查询 `KG` 可以命中资料中的 `知识图谱`。修改同义词表后重启后端即可生效，无需重建搜索索引。
+  高级模式下可通过 `synonym_query=true` 启用查询期同义词扩展。词表位于 `data/synonyms.json`，格式为 `{ "标准词": ["同义词", "缩写"] }`。检索时同一查询词的原词与同义词按 OR 连接，不同查询词仍按 AND 连接；例如查询 `KG` 可以命中资料中的 `知识图谱`。修改同义词表后重启后端即可生效，无需重建搜索索引。
 
 - `POST /experimental-query`：实验性模拟查询接口，基于预构建倒排索引，兼容别名 `POST /query`。请求体示例：
 

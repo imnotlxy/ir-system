@@ -49,6 +49,7 @@ class SearchWorker(QThread):
         llm_rerank: bool = False,
         llm_query_weight: bool = False,
         pinyin_query: bool = False,
+        synonym_query: bool = False,
     ):
         super().__init__()
         self.api_client = api_client
@@ -61,6 +62,7 @@ class SearchWorker(QThread):
         self.llm_rerank = llm_rerank
         self.llm_query_weight = llm_query_weight
         self.pinyin_query = pinyin_query
+        self.synonym_query = synonym_query
 
     def run(self) -> None:
         try:
@@ -74,6 +76,7 @@ class SearchWorker(QThread):
                 llm_rerank=self.llm_rerank,
                 llm_query_weight=self.llm_query_weight,
                 pinyin_query=self.pinyin_query,
+                synonym_query=self.synonym_query,
             )
             self.results_ready.emit(results, elapsed, mode_info, suggestions)
         except Exception as e:
@@ -201,6 +204,11 @@ class MainWindow(QMainWindow):
             "输入教师姓名全拼或首字母进行匹配，例如 zhouguodong / zgd。"
         )
         match_layout.addWidget(self.chk_pinyin_query)
+        self.chk_synonym_query = QCheckBox("同义词扩展")
+        self.chk_synonym_query.setToolTip(
+            "使用 data/synonyms.json 在查询期扩展同义词和缩写，例如 KG / 知识图谱。"
+        )
+        match_layout.addWidget(self.chk_synonym_query)
         self.chk_llm_rerank = QCheckBox("LLM 重排")
         self.chk_llm_rerank.setToolTip(
             "使用 DeepSeek 大模型对前 20 条结果进行相关性重排（仅高级模式可用）"
@@ -383,6 +391,7 @@ class MainWindow(QMainWindow):
             self.chk_llm_query_weight.isChecked() if self.advanced else False
         )
         pinyin_query = self.chk_pinyin_query.isChecked() if self.advanced else False
+        synonym_query = self.chk_synonym_query.isChecked() if self.advanced else False
         if college_filter == []:
             self.current_results = []
             self.current_page = 0
@@ -412,6 +421,7 @@ class MainWindow(QMainWindow):
             llm_rerank=llm_rerank,
             llm_query_weight=llm_query_weight,
             pinyin_query=pinyin_query,
+            synonym_query=synonym_query,
         )
         self._search_worker.results_ready.connect(
             lambda results, elapsed, mode_info, suggestions, rid=request_id: self._on_search_done(

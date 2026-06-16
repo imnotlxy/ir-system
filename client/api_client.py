@@ -117,6 +117,7 @@ class SearchApiClient:
         llm_rerank: bool = False,
         llm_query_weight: bool = False,
         pinyin_query: bool = False,
+        synonym_query: bool = False,
     ) -> tuple[list[SearchResult], float, str, list[str]]:
         payload = {
             "query": query,
@@ -128,6 +129,7 @@ class SearchApiClient:
             "llm_rerank": llm_rerank,
             "llm_query_weight": llm_query_weight,
             "pinyin_query": pinyin_query,
+            "synonym_query": synonym_query,
         }
         data = self._request("POST", "search", payload)
         results = [SearchResult.from_dict(item) for item in data.get("results", [])]

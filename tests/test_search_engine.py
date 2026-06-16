@@ -155,8 +155,10 @@ class SearchEngineTest(unittest.TestCase):
 
             engine = SearchEngine(root)
             engine.load_data()
-            results = engine.search("KG", top_k=3)
+            disabled_results = engine.search("KG", top_k=3)
+            results = engine.search("KG", use_synonyms=True, top_k=3)
 
+            self.assertEqual(disabled_results, [])
             self.assertTrue(results)
             names = {result.record.name for result in results}
             self.assertIn("陈伟", names)
@@ -170,7 +172,7 @@ class SearchEngineTest(unittest.TestCase):
 
             engine = SearchEngine(root)
             engine.load_data()
-            results = engine.search("NLP", top_k=10)
+            results = engine.search("NLP", use_synonyms=True, top_k=10)
             names = {result.record.name for result in results}
 
             self.assertIn("陈伟", names)
@@ -184,7 +186,12 @@ class SearchEngineTest(unittest.TestCase):
 
             engine = SearchEngine(root)
             engine.load_data()
-            results = engine.search("KG", search_field="research", top_k=3)
+            results = engine.search(
+                "KG",
+                search_field="research",
+                use_synonyms=True,
+                top_k=3,
+            )
 
             self.assertTrue(results)
             self.assertEqual(results[0].record.name, "陈伟")
@@ -221,6 +228,24 @@ class SearchEngineTest(unittest.TestCase):
                 normal_api = SearchApi(root, advanced=False)
                 advanced_api = SearchApi(root, advanced=True)
             payload = {"query": "chenwei", "pinyin_query": True, "top_k": 3}
+
+            normal_results = normal_api.search(payload)["results"]
+            advanced_results = advanced_api.search(payload)["results"]
+
+            self.assertEqual(normal_results, [])
+            self.assertTrue(advanced_results)
+            self.assertEqual(advanced_results[0]["record"]["name"], "陈伟")
+
+    def test_api_allows_synonym_query_only_in_advanced_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_sample_data(root)
+            self._write_sample_synonyms(root)
+
+            with patch("backend.server.ExperimentalQueryIndex.load"):
+                normal_api = SearchApi(root, advanced=False)
+                advanced_api = SearchApi(root, advanced=True)
+            payload = {"query": "KG", "synonym_query": True, "top_k": 3}
 
             normal_results = normal_api.search(payload)["results"]
             advanced_results = advanced_api.search(payload)["results"]

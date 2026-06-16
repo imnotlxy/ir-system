@@ -129,6 +129,7 @@ class SearchApi:
             bool(payload.get("llm_query_weight", False)) and self.advanced
         )
         pinyin_query = bool(payload.get("pinyin_query", False)) and self.advanced
+        synonym_query = bool(payload.get("synonym_query", False)) and self.advanced
         research_filter = str(payload.get("research_filter", ""))
 
         token_weights: dict[str, float] | None = None
@@ -157,9 +158,12 @@ class SearchApi:
             top_k=int(payload.get("top_k", 50)),
             token_weights=token_weights,
             pinyin_query=pinyin_query,
+            use_synonyms=synonym_query,
         )
 
         mode_info = _build_mode_info(results)
+        if synonym_query:
+            mode_info = f"{mode_info}（同义词扩展）"
         if token_weights:
             weights_summary = " ".join(f"{t}={w:.1f}" for t, w in token_weights.items())
             mode_info = f"{mode_info}（LLM 查询加权：{weights_summary}）"
