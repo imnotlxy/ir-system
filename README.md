@@ -115,3 +115,62 @@ sanitize_file_to_file("data/raw/page.html", "data/sanitized/page.html")
 - 电话号码替换为 `XXX`。
 - 邮箱地址替换为 `name at domain dot tld` 形式。
 - 支持常见手机号、带区号固话、`400/800` 服务号码、带 `转`/`分机`/`ext` 的号码，以及 `电话`/`Tel`/`Phone` 等标签后的本地号码。
+
+## Benchmark 测试报告
+
+测试日期：2026-06-23
+
+本轮运行命令：
+
+```bash
+uv run python -m bench.benchmark --include-llm
+uv run python -m bench.related_benchmark
+uv run python -m unittest discover -s tests
+```
+
+### 搜索词 -> 教师
+
+评测集：`bench/cases.json`，共 19 条。指标为 Hit@1 / Hit@5，默认排序为 BM25。
+
+| 配置 | Hit@1 | Hit@5 | 说明 |
+|---|---:|---:|---|
+| baseline | 7/19 (37%) | 7/19 (37%) | 精确匹配基线 |
+| fuzzy | 7/19 (37%) | 13/19 (68%) | 自动放宽主要提升召回，Top-1 无提升 |
+| pinyin | 13/19 (68%) | 13/19 (68%) | 拼音全拼/首字母查询收益明显 |
+| synonym | 7/19 (37%) | 10/19 (53%) | 可命中 KG、计科院等同义/简称样例，但排序仍弱 |
+| advanced | 13/19 (68%) | 17/19 (89%) | fuzzy + pinyin + synonym 组合 |
+| llm-weight | 13/19 (68%) | 17/19 (89%) | LLM 查询加权，本轮与 advanced 持平 |
+| llm-rerank | 16/19 (84%) | 17/19 (89%) | LLM 重排显著提升 Top-1 |
+| llm-all | 16/19 (84%) | 17/19 (89%) | LLM 加权 + 重排，与单独重排持平 |
+
+关键观察：
+
+- `pinyin` 将 `zgd`、`cuishuang`、`lishoushan`、`lss`、`lpf`、`zhaolei` 等拼音查询提升为 Top-1 命中。
+- `fuzzy` 能把 `周国`、`李寿`、部分拼音误触发样例召回到 Top5，但噪声较多，Top-1 没有改善。
+- `synonym` 对 `KG`、`KG 陈副教授`、`计科院 计算机网络` 有帮助，但 `知识图谱、教授` 等样例仍存在排序干扰。
+- `llm-rerank` 将 `周国`、`知识图谱、教授`、`KG` 等样例从非 Top-1 提升为 Top-1，是本轮最有效的 Top-1 优化。
+- `ACM、算法、NLP` 与 `李寿` 仍未进入 Hit@5；`计科院 计算机网络` 命中 Top5 但 Top-1 是唐灯平，杨哲第 2。
+- 本轮 `llm-rerank` 在 `李寿` 用例出现一次 DeepSeek 空响应，脚本按设计回退到原排序；汇总指标包含该回退结果。
+
+### 教师 -> 相近教师
+
+评测集：`bench/related_cases.json`，共 15 条，其中单答案 9 条、双答案 6 条。指标为 Hit@1 / Hit@5。
+
+| 指标 | 结果 |
+|---|---:|
+| Hit@1 | 7/15 (47%) |
+| Hit@5 | 12/15 (80%) |
+
+Top-1 未命中的代表样例：
+
+- `李寿山 -> 周国栋/王红玲`：Top-1 为张栋，周国栋第 4。
+- `赵雷 -> 陈伟/许佳捷`：Top-1 为章晓芳，许佳捷第 2。
+- `陈伟 -> 赵雷/崔爽`：Top-1 为晁平复，崔爽第 5。
+- `王邦军 -> 崔爽/杨壮`：Top-1 为朱哲辰，崔爽第 2。
+- `李正华 -> 贡正仙`、`朱晓旭 -> 刘安`、`陈伟 -> 赵雷` 未进入 Top5。
+
+结论：相近教师功能当前召回可用，但 Top-1 排序空间较大。主要问题是通用文本相似、同学院、同职称加分会压过更细粒度的研究方向判断。
+
+### 单元测试
+
+`uv run python -m unittest discover -s tests` 运行 38 个测试，全部通过。
